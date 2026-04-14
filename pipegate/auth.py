@@ -9,7 +9,7 @@ from .schemas import JWTPayload, Settings
 
 
 def verify_token(token: str, settings: Settings) -> JWTPayload:
-    """Decode and verify a JWT, returning the payload (connection ID in ``sub``)."""
+    """解码并验证 JWT 令牌，返回 payload（connection ID 存储在 ``sub`` 字段中）。"""
     decoded = jwt.decode(
         token,
         settings.jwt_secret.get_secret_value(),
@@ -19,7 +19,7 @@ def verify_token(token: str, settings: Settings) -> JWTPayload:
 
 
 def make_jwt_bearer() -> None:
-    """CLI helper: generate a connection ID and JWT token."""
+    """CLI 工具：生成 connection ID 和 JWT 令牌。"""
     settings = Settings(_cli_parse_args=True)  # #10: only here do we want CLI parsing
     connection_id = settings.connection_id or uuid.uuid4().hex
 

@@ -33,11 +33,13 @@ logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
+    """创建并配置 FastAPI 应用实例，包含 HTTP 请求处理和 WebSocket 隧道端点。"""
     buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+        """应用生命周期管理器，初始化配置并清理未完成的请求。"""
         app.extra["settings"] = Settings(_cli_parse_args=False)
         app.extra["buffers"] = buffers
         try:
@@ -54,6 +56,7 @@ def create_app() -> FastAPI:
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
+        """健康检查端点，返回服务状态。"""
         return {"status": "ok"}
 
     @app.api_route(
@@ -65,6 +68,7 @@ def create_app() -> FastAPI:
         request: Request,
         path_slug: str = "",
     ) -> Response:
+        """处理 HTTP 请求，将请求入队并等待 WebSocket 隧道返回响应。"""
         settings: Settings = request.app.extra["settings"]
         correlation_id = uuid.uuid4()
 
@@ -131,6 +135,7 @@ def create_app() -> FastAPI:
     async def handle_websocket(
         websocket: WebSocket,
     ) -> None:
+        """处理 WebSocket 连接，验证令牌后建立双向隧道通信。"""
         settings: Settings = websocket.app.extra["settings"]
         token: str | None = websocket.query_params.get("token")
         if not token:
@@ -153,6 +158,7 @@ def create_app() -> FastAPI:
         )
 
         async def receive() -> None:
+            """接收 WebSocket 消息并匹配对应的等待请求，完成响应传递。"""
             try:
                 while True:
                     message_text = await websocket.receive_text()
@@ -171,6 +177,7 @@ def create_app() -> FastAPI:
                 pass
 
         async def send() -> None:
+            """从队列获取请求并通过 WebSocket 发送给隧道客户端。"""
             while True:
                 request = await queue.get()
                 try:
