@@ -17,25 +17,25 @@ Expose a local server to the internet through a single WebSocket. No accounts, n
 ## Quick Start
 
 ```bash
-git clone https://github.com/janbjorge/pipegate.git && cd pipegate
+git clone https://github.com/AxelWT/pipegate.git && cd pipegate
 uv sync
 
-export PIPEGATE_JWT_SECRET="change-me-to-something-secret"
+# Copy .env.example to .env and configure
+cp .env.example .env
+# Edit .env: set PIPEGATE_JWT_SECRET and PIPEGATE_JWT_ALGORITHMS
+
+# Or set system properties
+export PIPEGATE_JWT_SECRET="your-secret"                                                                                                                                    
 export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
 
-# Generate a tunnel token (21-day expiry)
-python -m pipegate.auth
-# Connection-id: a1b2c3d4...
-# JWT Bearer:    eyJhbGci...
-
 # Run the server (on your public VPS)
-python -m pipegate.server
+python run.py server --port 8000
 
 # Run the client (on your local machine, another terminal)
-python -m pipegate.client http://localhost:3000 "ws://yourserver:8000/?token=<jwt>"
+python run.py client http://localhost:3000 --server ws://yourserver:8000
 ```
 
-Requests to `http://yourserver:8000/a1b2c3d4/anything` now reach `http://localhost:3000/anything`.
+Requests to `http://yourserver:8000/<connection_id>/anything` now reach `http://localhost:3000/anything`. The client automatically generates a JWT token with 100-year expiry (effectively no expiration).
 
 ## How It Works
 
@@ -62,30 +62,41 @@ Multiple requests fly concurrently over one WebSocket -- the correlation ID is w
 Tunnel connections are JWT-authenticated. The token carries the connection ID as its `sub` claim -- it's the only credential the client needs.
 
 ```bash
-# Both server and token generator need the same secret
-export PIPEGATE_JWT_SECRET="my-secret"
-export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
+# Configure in .env file (both server and client use the same settings)
+cp .env.example .env
+# Edit .env with your secret and algorithm
 
-# Generate token
+# Client automatically generates token and connects
+python run.py client http://localhost:3000 --server ws://server:8000
+```
+
+The client generates a token with 100-year expiry by default. If you need a specific connection ID or want to generate a token manually:
+
+```bash
+# Generate token manually (optional)
 python -m pipegate.auth
-
-# Client connects with the token
-python -m pipegate.client http://localhost:3000 "ws://server/?token=<jwt>"
 ```
 
 External HTTP callers don't need the JWT. They only need the connection ID in the URL path. The server rejects WebSocket connections with missing, expired, or invalid tokens (close code 1008).
 
 ## Configuration
 
-Environment variables via pydantic-settings:
+Configuration is loaded via pydantic-settings. Priority order: environment variables > `.env` file > defaults.
+
+Create a `.env` file from the example:
+
+```bash
+cp .env.example .env
+```
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PIPEGATE_JWT_SECRET` | Yes | -- | Shared secret for JWT signing/verification |
-| `PIPEGATE_JWT_ALGORITHMS` | Yes | -- | Algorithm list, e.g. `'["HS256"]'` |
+| `PIPEGATE_JWT_ALGORITHMS` | Yes | -- | Algorithm list, e.g. `["HS256"]` |
 | `PIPEGATE_CONNECTION_ID` | No | random UUID | Pin a specific connection ID when generating tokens |
 | `PIPEGATE_MAX_BODY_BYTES` | No | 10 MB | Reject requests larger than this (413) |
 | `PIPEGATE_MAX_QUEUE_DEPTH` | No | 100 | Per-tunnel queue size before returning 503 |
+| `PIPEGATE_TOKEN_EXPIRY_DAYS` | No | 36500 | Token expiry days (~100 years, effectively no expiration) |
 
 ## Endpoints
 

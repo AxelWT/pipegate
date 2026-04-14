@@ -63,7 +63,7 @@ class JWTPayload(BaseModel):
 
 
 class Settings(BaseSettings):
-    """应用配置模型，从环境变量加载设置。
+    """应用配置模型，从 .env 文件和环境变量加载设置。
 
     配置项：
     - connection_id：可选的连接标识符（仅用于 CLI 生成令牌）
@@ -73,9 +73,13 @@ class Settings(BaseSettings):
     - max_queue_depth：请求队列深度上限，默认 100
     - token_expiry_days：Token 过期天数，默认 36500（约 100 年，相当于不过期）
 
-    使用 pydantic-settings 从环境变量自动加载，环境变量名通过 alias 定义。
+    加载顺序：优先从 .env 文件加载，然后从环境变量加载（环境变量优先级更高）。
     """
-    model_config = SettingsConfigDict(cli_parse_args=False)
+    model_config = SettingsConfigDict(
+        cli_parse_args=False,
+        env_file=".env",
+        env_file_encoding="utf-8",
+    )
     connection_id: str | None = Field(alias="PIPEGATE_CONNECTION_ID", default=None)
     jwt_secret: SecretStr = Field(alias="PIPEGATE_JWT_SECRET")
     jwt_algorithms: list[str] = Field(alias="PIPEGATE_JWT_ALGORITHMS")
