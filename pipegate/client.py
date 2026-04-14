@@ -18,7 +18,15 @@ _BACKOFF_MAX: float = 60.0
 
 @app.command()
 def start_client(target_url: str, server_url: str) -> None:
-    """Start the PipeGate client to expose a local server."""
+    """启动 PipeGate 客户端的 CLI 入口。
+
+    原理：使用 Typer CLI 框架，接收两个参数：
+    - target_url：本地服务的地址（如 http://localhost:9000）
+    - server_url：PipeGate 服务器的 WebSocket 地址
+
+    调用 asyncio.run() 启动异步主循环，建立到服务器的 WebSocket 连接，
+    并持续转发请求到本地服务。
+    """
     asyncio.run(main(target_url, server_url))
 
 
@@ -28,6 +36,17 @@ async def handle_request(
     http_client: httpx.AsyncClient,
     ws_client: ClientConnection,
 ) -> None:
+    """处理从服务器收到的请求，转发到本地目标并返回响应。
+
+    原理：
+    1. 解析请求中的方法、路径、headers、查询参数和 base64 编码的 body
+    2. 使用 httpx 将请求转发到本地目标服务（target + url_path）
+    3. 将响应的 headers、body（base64编码）和状态码封装为 BufferGateResponse
+    4. 通过 WebSocket 发回给 PipeGate 服务器，由 correlation_id 匹配原始请求
+
+    异常处理：任何错误（连接失败、超时等）都返回 504 Gateway Timeout，
+    确保服务器端的等待请求能收到明确的错误响应而非无限挂起。
+    """
     try:
         response = await http_client.request(
             method=request.method,
@@ -55,6 +74,18 @@ async def handle_request(
 
 
 async def main(target_url: str, server_url: str) -> None:
+    """客户端主循环：管理 WebSocket 连接和请求转发。
+
+    原理：
+    1. 使用指数退避策略重连：初始 1 秒，每次失败翻倍，最大 60 秒
+    2. 成功连接后重置退避计数器，进入请求转发循环
+    3. 使用 TaskGroup 并发处理多个请求，每个请求独立异步处理
+    4. 持续接收 WebSocket 消息，解析为 BufferGateRequest 并转发
+
+    连接管理：ConnectionRefusedError/OSError 触发重连，
+    其他异常也触发重连（防御性处理）。
+    asyncio.CancelledError 直接退出（用户终止）。
+    """
     attempt = 0
 
     while True:
