@@ -35,7 +35,7 @@ def make_jwt_bearer() -> None:
 
     jwt_payload = JWTPayload(
         sub=connection_id,
-        exp=int((datetime.now(UTC) + timedelta(days=21)).timestamp()),
+        exp=int((datetime.now(UTC) + timedelta(days=settings.token_expiry_days)).timestamp()),
     )
 
     jwt_bearer = jwt.encode(

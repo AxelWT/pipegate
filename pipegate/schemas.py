@@ -71,6 +71,7 @@ class Settings(BaseSettings):
     - jwt_algorithms：允许的 JWT 算法列表，必须配置
     - max_body_bytes：请求体大小上限，默认 10MB
     - max_queue_depth：请求队列深度上限，默认 100
+    - token_expiry_days：Token 过期天数，默认 36500（约 100 年，相当于不过期）
 
     使用 pydantic-settings 从环境变量自动加载，环境变量名通过 alias 定义。
     """
@@ -85,4 +86,8 @@ class Settings(BaseSettings):
     max_queue_depth: int = Field(
         alias="PIPEGATE_MAX_QUEUE_DEPTH",
         default=100,
+    )
+    token_expiry_days: int = Field(
+        alias="PIPEGATE_TOKEN_EXPIRY_DAYS",
+        default=36500,  # 约 100 年，相当于不过期
     )
