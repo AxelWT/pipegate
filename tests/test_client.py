@@ -9,8 +9,35 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import orjson
 
-from pipegate.client import handle_request, main
+from pipegate.client import handle_request, main, rewrite_html_paths
 from pipegate.schemas import BufferGateRequest, BufferGateResponse
+
+
+class TestRewriteHtmlPaths:
+    def test_rewrites_absolute_paths(self) -> None:
+        html = '<link href="/static/style.css"><script src="/js/app.js"></script>'
+        result = rewrite_html_paths(html, "my-conn-id")
+        assert result == '<link href="/my-conn-id/static/style.css"><script src="/my-conn-id/js/app.js"></script>'
+
+    def test_preserves_relative_paths(self) -> None:
+        html = '<link href="style.css"><script src="./app.js"></script>'
+        result = rewrite_html_paths(html, "my-conn-id")
+        assert result == '<link href="style.css"><script src="./app.js"></script>'
+
+    def test_preserves_protocol_relative_urls(self) -> None:
+        html = '<script src="//cdn.example.com/lib.js"></script>'
+        result = rewrite_html_paths(html, "my-conn-id")
+        assert result == '<script src="//cdn.example.com/lib.js"></script>'
+
+    def test_preserves_already_rewritten_paths(self) -> None:
+        html = '<link href="/my-conn-id/static/style.css">'
+        result = rewrite_html_paths(html, "my-conn-id")
+        assert result == '<link href="/my-conn-id/static/style.css">'
+
+    def test_handles_action_attribute(self) -> None:
+        html = '<form action="/submit"><img data-src="/images/logo.png">'
+        result = rewrite_html_paths(html, "my-conn-id")
+        assert result == '<form action="/my-conn-id/submit"><img data-src="/my-conn-id/images/logo.png">'
 
 
 class TestHandleRequest:
@@ -18,6 +45,7 @@ class TestHandleRequest:
         ws = AsyncMock()
         request = BufferGateRequest(
             correlation_id=uuid.uuid4(),
+            connection_id="test-conn",
             url_path="api/data",
             url_query=orjson.dumps([["key", "value"]]).decode(),
             method="GET",
@@ -44,6 +72,7 @@ class TestHandleRequest:
         binary = bytes(range(256))
         request = BufferGateRequest(
             correlation_id=uuid.uuid4(),
+            connection_id="test-conn",
             url_path="upload",
             url_query=orjson.dumps([]).decode(),
             method="POST",
@@ -71,6 +100,7 @@ class TestHandleRequest:
         ws = AsyncMock()
         request = BufferGateRequest(
             correlation_id=uuid.uuid4(),
+            connection_id="test-conn",
             url_path="api/data",
             url_query=orjson.dumps([]).decode(),
             method="GET",
@@ -89,6 +119,43 @@ class TestHandleRequest:
         resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
         assert resp.status_code == 504
         assert resp.body == ""
+
+    async def test_html_response_path_rewrite(self) -> None:
+        """测试 HTML 响应中的路径被正确重写。"""
+        ws = AsyncMock()
+        html_content = '<html><head><link href="/static/style.css"></head><body></body></html>'
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            connection_id="test-conn-123",
+            url_path="index.html",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=html_content.encode("utf-8"),
+                headers={
+                    "content-type": "text/html; charset=utf-8",
+                    "content-length": str(len(html_content.encode("utf-8"))),
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
+        decoded_body = base64.b64decode(resp.body).decode("utf-8")
+        assert "/test-conn-123/static/style.css" in decoded_body
+        assert 'href="/static/style.css"' not in decoded_body
+        # 验证 Content-Length header 被移除
+        resp_headers = orjson.loads(resp.headers)
+        assert "content-length" not in resp_headers
 
 
 class TestMainReconnect:

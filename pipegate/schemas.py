@@ -22,6 +22,7 @@ class BufferGateRequest(BaseModel):
 
     字段说明：
     - correlation_id：唯一请求标识符，用于匹配响应
+    - connection_id：连接标识符，用于 HTML 内容路径重写
     - url_path：请求路径（不含 connection_id）
     - url_query：查询参数，JSON 编码的键值对列表
     - method：HTTP 方法（GET/POST/PUT/DELETE/PATCH/OPTIONS/HEAD）
@@ -29,6 +30,7 @@ class BufferGateRequest(BaseModel):
     - body：请求体，base64 编码（支持二进制数据）
     """
     correlation_id: uuid.UUID
+    connection_id: str
     url_path: str
     url_query: str
     method: Methods

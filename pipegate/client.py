@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import re
 
 import httpx
 import orjson
@@ -14,6 +15,37 @@ app = typer.Typer()
 
 _BACKOFF_BASE: float = 1.0
 _BACKOFF_MAX: float = 60.0
+
+# 匹配 HTML 中绝对路径的正则表达式
+# 匹配 href="/xxx", src="/xxx", action="/xxx" 等属性
+_ABSOLUTE_PATH_PATTERN = re.compile(
+    r'''(href|src|action|data-src|data-href|poster|background|content)=["'](/[^"']*)["']''',
+    re.IGNORECASE,
+)
+
+
+def rewrite_html_paths(html_content: str, connection_id: str) -> str:
+    """重写 HTML 内容中的绝对路径。
+
+    将 href="/static/style.css" 等绝对路径转换为
+    href="/connection_id/static/style.css"，使静态文件能通过隧道正确加载。
+
+    Args:
+        html_content: HTML 内容字符串
+        connection_id: 连接标识符
+
+    Returns:
+        重写后的 HTML 内容
+    """
+    def replace_path(match: re.Match[str]) -> str:
+        attr = match.group(1)
+        path = match.group(2)
+        # 排除特殊路径：以 // 开头的协议相对URL、已经包含 connection_id 的路径
+        if path.startswith("//") or path.startswith(f"/{connection_id}"):
+            return match.group(0)
+        return f'{attr}="/{connection_id}{path}"'
+
+    return _ABSOLUTE_PATH_PATTERN.sub(replace_path, html_content)
 
 
 @app.command()
@@ -42,7 +74,8 @@ async def handle_request(
     1. 解析请求中的方法、路径、headers、查询参数和 base64 编码的 body
     2. 使用 httpx 将请求转发到本地目标服务（target + url_path）
     3. 将响应的 headers、body（base64编码）和状态码封装为 BufferGateResponse
-    4. 通过 WebSocket 发回给 PipeGate 服务器，由 correlation_id 匹配原始请求
+    4. 如果响应是 HTML 内容，重写其中的绝对路径为包含 connection_id 的路径
+    5. 通过 WebSocket 发回给 PipeGate 服务器，由 correlation_id 匹配原始请求
 
     异常处理：任何错误（连接失败、超时等）都返回 504 Gateway Timeout，
     确保服务器端的等待请求能收到明确的错误响应而非无限挂起。
@@ -55,10 +88,27 @@ async def handle_request(
             params=orjson.loads(request.url_query),
             content=base64.b64decode(request.body) if request.body else b"",
         )
+
+        # 处理响应 body：如果是 HTML 则重写路径
+        response_body = response.content
+        response_headers = dict(response.headers)
+        content_type = response.headers.get("content-type", "")
+        if "text/html" in content_type or "application/xhtml+xml" in content_type:
+            try:
+                html_content = response_body.decode("utf-8")
+                rewritten_html = rewrite_html_paths(html_content, request.connection_id)
+                response_body = rewritten_html.encode("utf-8")
+                # 移除 Content-Length 和 Transfer-Encoding，因为 body 大小已改变
+                response_headers.pop("content-length", None)
+                response_headers.pop("transfer-encoding", None)
+            except UnicodeDecodeError:
+                # 如果无法解码，保持原始内容不变
+                pass
+
         payload = BufferGateResponse(
             correlation_id=request.correlation_id,
-            headers=orjson.dumps(dict(response.headers)).decode(),
-            body=base64.b64encode(response.content).decode(),
+            headers=orjson.dumps(response_headers).decode(),
+            body=base64.b64encode(response_body).decode(),
             status_code=response.status_code,
         )
     except Exception as e:

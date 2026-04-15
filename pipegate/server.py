@@ -124,6 +124,7 @@ def create_app() -> FastAPI:
             queue.put_nowait(
                 BufferGateRequest(
                     correlation_id=correlation_id,
+                    connection_id=connection_id,
                     method=cast(Methods, request.method),
                     url_path=path_slug,
                     url_query=orjson.dumps(
