@@ -157,6 +157,114 @@ class TestHandleRequest:
         resp_headers = orjson.loads(resp.headers)
         assert "content-length" not in resp_headers
 
+    async def test_non_html_response_unchanged(self) -> None:
+        """测试非 HTML 响应保持原样传递。"""
+        ws = AsyncMock()
+        css_content = "body { color: red; }"
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            connection_id="test-conn-123",
+            url_path="static/style.css",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=css_content.encode("utf-8"),
+                headers={
+                    "content-type": "text/css",
+                    "content-length": str(len(css_content.encode("utf-8"))),
+                    "cache-control": "max-age=3600",
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
+        # 验证内容不变
+        assert base64.b64decode(resp.body).decode("utf-8") == css_content
+        # 验证 headers 保留（包括 content-length）
+        resp_headers = orjson.loads(resp.headers)
+        assert resp_headers.get("content-type") == "text/css"
+        assert resp_headers.get("content-length") == str(len(css_content.encode("utf-8")))
+        assert resp_headers.get("cache-control") == "max-age=3600"
+
+    async def test_javascript_response_unchanged(self) -> None:
+        """测试 JS 响应保持原样传递。"""
+        ws = AsyncMock()
+        js_content = "console.log('hello');"
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            connection_id="test-conn-123",
+            url_path="static/app.js",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=js_content.encode("utf-8"),
+                headers={
+                    "content-type": "application/javascript",
+                    "content-length": str(len(js_content.encode("utf-8"))),
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
+        assert base64.b64decode(resp.body).decode("utf-8") == js_content
+        resp_headers = orjson.loads(resp.headers)
+        assert resp_headers.get("content-type") == "application/javascript"
+        assert resp_headers.get("content-length") == str(len(js_content.encode("utf-8")))
+
+    async def test_json_response_unchanged(self) -> None:
+        """测试 JSON API 响应保持原样传递。"""
+        ws = AsyncMock()
+        json_content = '{"status": "ok"}'
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            connection_id="test-conn-123",
+            url_path="api/status",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=json_content.encode("utf-8"),
+                headers={
+                    "content-type": "application/json",
+                    "content-length": str(len(json_content.encode("utf-8"))),
+                },
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
+        assert base64.b64decode(resp.body).decode("utf-8") == json_content
+        resp_headers = orjson.loads(resp.headers)
+        assert "content-length" in resp_headers
+
 
 class TestMainReconnect:
     async def test_retries_on_connection_refused(self) -> None:
