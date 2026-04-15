@@ -89,10 +89,23 @@ async def handle_request(
             content=base64.b64decode(request.body) if request.body else b"",
         )
 
+        # DEBUG: 打印请求和响应信息
+        typer.echo(f"[DEBUG] Request: {request.method} {target}/{request.url_path}")
+        typer.echo(f"[DEBUG] Response status: {response.status_code}")
+        typer.echo(f"[DEBUG] Response content-type: {response.headers.get('content-type', 'N/A')}")
+        typer.echo(f"[DEBUG] Response body length: {len(response.content)} bytes")
+        if len(response.content) < 500:
+            typer.echo(f"[DEBUG] Response body: {response.content[:500]}")
+
         # 处理响应 body：如果是 HTML 则重写路径
         response_body = response.content
         response_headers = dict(response.headers)
         content_type = response.headers.get("content-type", "")
+
+        # httpx 会自动解压 gzip/deflate 内容，但响应头仍保留 Content-Encoding
+        # 必须移除，否则浏览器会尝试再次解压导致 ERR_CONTENT_DECODING_FAILED
+        response_headers.pop("content-encoding", None)
+
         if "text/html" in content_type or "application/xhtml+xml" in content_type:
             try:
                 html_content = response_body.decode("utf-8")
