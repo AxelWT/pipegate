@@ -12,6 +12,7 @@ class TestBufferGateRequest:
     def test_roundtrip_json(self) -> None:
         req = BufferGateRequest(
             correlation_id=uuid.uuid4(),
+            connection_id="test-connection",
             url_path="/hello",
             url_query="{}",
             method="GET",
@@ -24,6 +25,7 @@ class TestBufferGateRequest:
         with pytest.raises(ValidationError):
             BufferGateRequest(
                 correlation_id=uuid.uuid4(),
+                connection_id="test-connection",
                 url_path="/",
                 url_query="{}",
                 method="INVALID",
