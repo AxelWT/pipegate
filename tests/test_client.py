@@ -170,6 +170,37 @@ class TestMainReconnect:
 
         assert call_count >= 2
 
+    async def test_backoff_starts_at_one_second(self) -> None:
+        """First reconnect waits 1s (2^0), not 2s — matches README's 1s..60s."""
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        call_count = 0
+        connect_cm = AsyncMock()
+
+        async def side_effect(*a: object, **kw: object) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count <= 3:
+                raise ConnectionRefusedError("refused")
+            raise asyncio.CancelledError()
+
+        connect_cm.__aenter__ = side_effect
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            contextlib.suppress(asyncio.CancelledError),
+            patch("pipegate.client.connect", return_value=connect_cm),
+            patch("pipegate.client.asyncio.sleep", new=fake_sleep),
+        ):
+            await main("http://localhost:9000", "ws://fake:8000/conn")
+
+        assert sleeps[0] == 1.0
+        assert sleeps[1] == 2.0
+        assert sleeps[2] == 4.0
+
     async def test_reconnects_when_established_connection_drops(self) -> None:
         """A dropped established connection must trigger reconnection,
         not a busy-loop of repeated recv() failures."""

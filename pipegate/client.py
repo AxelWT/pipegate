@@ -59,9 +59,8 @@ async def main(target_url: str, server_url: str) -> None:
     attempt = 0
 
     while True:
-        delay = min(_BACKOFF_BASE * (2**attempt), _BACKOFF_MAX)
-
         if attempt > 0:
+            delay = min(_BACKOFF_BASE * (2 ** (attempt - 1)), _BACKOFF_MAX)
             print(
                 f"Reconnecting in {delay:.0f}s (attempt {attempt + 1})...",
                 file=sys.stderr,
