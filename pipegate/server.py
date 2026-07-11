@@ -10,7 +10,6 @@ from contextlib import asynccontextmanager
 from typing import cast, get_args
 
 import orjson
-import uvicorn
 from fastapi import (
     FastAPI,
     HTTPException,
@@ -38,7 +37,7 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-        app.extra["settings"] = Settings(_cli_parse_args=False)
+        app.extra["settings"] = Settings()
         app.extra["buffers"] = buffers
         try:
             yield
@@ -75,13 +74,12 @@ def create_app() -> FastAPI:
                 detail=f"Request body exceeds limit of {settings.max_body_bytes} bytes",
             )
 
-        running_loop = asyncio.get_running_loop()
-        future: asyncio.Future[BufferGateResponse] = running_loop.create_future()
+        future: asyncio.Future[BufferGateResponse] = asyncio.Future()
         futures[correlation_id] = future
 
-        queue = buffers.setdefault(
-            connection_id, asyncio.Queue(maxsize=settings.max_queue_depth)
-        )
+        if connection_id not in buffers:
+            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
+        queue = buffers[connection_id]
 
         try:
             queue.put_nowait(
@@ -148,9 +146,9 @@ def create_app() -> FastAPI:
         await websocket.accept()
         logger.info("WebSocket connected: %s", connection_id)
 
-        queue = buffers.setdefault(
-            connection_id, asyncio.Queue(maxsize=settings.max_queue_depth)
-        )
+        if connection_id not in buffers:
+            buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
+        queue = buffers[connection_id]
 
         async def receive() -> None:
             try:
@@ -202,8 +200,3 @@ def create_app() -> FastAPI:
         buffers.pop(connection_id, None)
 
     return app
-
-
-if __name__ == "__main__":
-    app = create_app()
-    uvicorn.run(app, host="0.0.0.0", port=8000)
