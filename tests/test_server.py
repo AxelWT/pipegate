@@ -477,6 +477,31 @@ class TestHealth:
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
+    async def test_healthz_on_base_domain_in_subdomain_mode(self) -> None:
+        """In subdomain mode, /healthz on the base domain itself still works."""
+        app = _make_subdomain_app()
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(
+            transport=transport, base_url=f"http://{BASE_DOMAIN}"
+        ) as client:
+            resp = await client.get("/healthz")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "ok"}
+
+    async def test_healthz_forwarded_on_subdomain(self, connection_id: str) -> None:
+        """In subdomain mode, /healthz on a subdomain must be forwarded to the
+        tunnel, not intercepted by PipeGate."""
+        resp, fwd = await _ws_roundtrip_subdomain(
+            _make_subdomain_app(),
+            connection_id,
+            make_token(connection_id),
+            path="healthz",
+        )
+        assert resp.status_code == 200
+        assert fwd["url_path"] == "healthz"
+
 
 class TestLifespanShutdown:
     async def test_shutdown_tolerates_concurrent_future_pop(self) -> None:

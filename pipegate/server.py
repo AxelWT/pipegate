@@ -100,10 +100,6 @@ def create_app() -> FastAPI:
     app = FastAPI(lifespan=lifespan)
     app.extra["buffers"] = buffers
 
-    @app.get("/healthz")
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
     @app.api_route(
         "/{full_path:path}",
         methods=list(get_args(Methods)),
@@ -113,9 +109,17 @@ def create_app() -> FastAPI:
         full_path: str = "",
     ) -> Response:
         settings: Settings = request.app.extra["settings"]
-        connection_id, path_slug = _resolve_target(
-            full_path, request.headers.get("host"), settings
-        )
+        host = request.headers.get("host")
+
+        if full_path == "healthz":
+            host_no_port = (host or "").split(":", 1)[0].lower()
+            if not settings.base_domain or host_no_port == settings.base_domain:
+                return Response(
+                    content=orjson.dumps({"status": "ok"}),
+                    media_type="application/json",
+                )
+
+        connection_id, path_slug = _resolve_target(full_path, host, settings)
         correlation_id = uuid.uuid4()
 
         body_buf = bytearray()
