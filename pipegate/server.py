@@ -60,7 +60,7 @@ def _resolve_target(
     the connection_id and the remainder is forwarded.
     """
     if settings.base_domain:
-        base = "." + settings.base_domain
+        base = "." + settings.base_domain.lstrip(".")
         host_no_port = (host or "").split(":", 1)[0].lower()
         if host_no_port.endswith(base) and len(host_no_port) > len(base):
             connection_id = host_no_port[: -len(base)]

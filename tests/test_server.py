@@ -917,6 +917,61 @@ class TestSubdomainRouting:
         a_vals = sorted(v for k, v in query if k == "a")
         assert a_vals == ["1", "2"]
 
+    async def test_base_domain_with_leading_dot(self, connection_id: str) -> None:
+        """A common mistake is setting PIPEGATE_BASE_DOMAIN='.tunnel.example.com'.
+        The leading dot must be tolerated, not cause all requests to 400."""
+        app = create_app()
+        settings = Settings()
+        settings.base_domain = "." + BASE_DOMAIN
+        app.extra["settings"] = settings
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+        base_url = f"http://{connection_id}.{BASE_DOMAIN}"
+
+        async with AsyncClient(transport=transport, base_url=base_url) as client:
+
+            async def ws_client() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": "/",
+                    "query_string": f"token={token}".encode(),
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+                )
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+                fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                fwd = json.loads(cast(str, fwd_msg["text"]))
+                response = BufferGateResponse(
+                    correlation_id=fwd["correlation_id"],
+                    headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                    body=base64.b64encode(b"ok").decode(),
+                    status_code=200,
+                )
+                await inbox.put(
+                    {"type": "websocket.receive", "text": response.model_dump_json()}
+                )
+                await asyncio.sleep(0.05)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=2)
+
+            ws_task = asyncio.create_task(ws_client())
+            await asyncio.sleep(0.01)
+            http_task = asyncio.create_task(client.get("/api/data"))
+
+            await ws_task
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+        assert resp.status_code == 200
+
 
 class TestPathModeBackwardCompat:
     """Without PIPEGATE_BASE_DOMAIN, path-based routing works as before."""
