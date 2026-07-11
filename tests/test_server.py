@@ -410,6 +410,32 @@ class TestQueueBackpressure:
 
 
 # ---------------------------------------------------------------------------
+# Memory cleanup for unconnected connection_ids
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryCleanup:
+    async def test_buffers_cleaned_up_for_unconnected_cid(
+        self, connection_id: str
+    ) -> None:
+        """When a request targets a cid with no tunnel connected, the
+        queue and pending set must be cleaned up after the request completes
+        — not leaked forever."""
+        app = _make_app()
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/probe"))
+            await asyncio.sleep(0.05)
+            http_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await http_task
+
+        buffers: dict[str, object] = app.extra["buffers"]
+        assert connection_id not in buffers
+
+
+# ---------------------------------------------------------------------------
 # Health endpoint
 # ---------------------------------------------------------------------------
 

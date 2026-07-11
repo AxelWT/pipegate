@@ -67,6 +67,7 @@ def create_app() -> FastAPI:
     buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
     pending_by_conn: dict[str, set[uuid.UUID]] = {}
+    connected_conns: set[str] = set()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -150,7 +151,12 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=504, detail="Gateway Timeout") from e
         finally:
             futures.pop(correlation_id, None)
-            pending_by_conn.get(connection_id, set()).discard(correlation_id)
+            conn_pending = pending_by_conn.get(connection_id)
+            if conn_pending is not None:
+                conn_pending.discard(correlation_id)
+                if not conn_pending and connection_id not in connected_conns:
+                    pending_by_conn.pop(connection_id, None)
+                    buffers.pop(connection_id, None)
 
         response_content = (
             b""
@@ -183,6 +189,7 @@ def create_app() -> FastAPI:
 
         await websocket.accept()
         logger.info("WebSocket connected: %s", connection_id)
+        connected_conns.add(connection_id)
 
         if connection_id not in buffers:
             buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
@@ -235,6 +242,7 @@ def create_app() -> FastAPI:
                 await task
 
         logger.info("WebSocket disconnected: %s", connection_id)
+        connected_conns.discard(connection_id)
         buffers.pop(connection_id, None)
         for cid in pending_by_conn.pop(connection_id, set()):
             fut = futures.pop(cid, None)
