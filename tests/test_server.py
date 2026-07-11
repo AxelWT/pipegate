@@ -770,6 +770,59 @@ class TestSubdomainRouting:
 
         assert resp.status_code == 400
 
+    async def test_subdomain_case_insensitive(self, connection_id: str) -> None:
+        """DNS is case-insensitive; a mixed-case Host must still resolve the
+        connection_id registered via JWT sub (which may be lowercase)."""
+        app = _make_subdomain_app()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+        upper_host = f"http://{connection_id.upper()}.{BASE_DOMAIN}"
+
+        async with AsyncClient(transport=transport, base_url=upper_host) as client:
+
+            async def ws_client() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": "/",
+                    "query_string": f"token={token}".encode(),
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+                )
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+                fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                fwd = json.loads(cast(str, fwd_msg["text"]))
+                response = BufferGateResponse(
+                    correlation_id=fwd["correlation_id"],
+                    headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                    body=base64.b64encode(b"ok").decode(),
+                    status_code=200,
+                )
+                await inbox.put(
+                    {"type": "websocket.receive", "text": response.model_dump_json()}
+                )
+                await asyncio.sleep(0.05)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=2)
+
+            ws_task = asyncio.create_task(ws_client())
+            await asyncio.sleep(0.01)
+            http_task = asyncio.create_task(client.get("/api/data"))
+
+            await ws_task
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+        assert resp.status_code == 200
+        assert resp.text == "ok"
+
     async def test_query_params_preserved(self, connection_id: str) -> None:
         resp, fwd = await _ws_roundtrip_subdomain(
             _make_subdomain_app(),

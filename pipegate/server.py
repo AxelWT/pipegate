@@ -46,7 +46,7 @@ def _resolve_target(
     """
     if settings.base_domain:
         base = "." + settings.base_domain
-        host_no_port = (host or "").split(":", 1)[0]
+        host_no_port = (host or "").split(":", 1)[0].lower()
         if host_no_port.endswith(base) and len(host_no_port) > len(base):
             connection_id = host_no_port[: -len(base)]
             return connection_id, full_path
@@ -179,7 +179,7 @@ def create_app() -> FastAPI:
             await websocket.close(code=1008, reason="Invalid token")
             return
 
-        connection_id = payload.sub
+        connection_id = payload.sub.lower()
 
         await websocket.accept()
         logger.info("WebSocket connected: %s", connection_id)
