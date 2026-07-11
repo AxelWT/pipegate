@@ -189,9 +189,15 @@ def create_app() -> FastAPI:
             if request.method == "HEAD"
             else (base64.b64decode(response.body) if response.body else b"")
         )
+        resp_headers = orjson.loads(response.headers) if response.headers else {}
+        # Defensive: even if a client failed to strip these, the server must
+        # not forward content-encoding/content-length that misdescribe the
+        # already-decoded body (would cause ERR_CONTENT_DECODING_FAILED).
+        for h in ("content-encoding", "content-length", "transfer-encoding"):
+            resp_headers.pop(h, None)
         return Response(
             content=response_content,
-            headers=orjson.loads(response.headers) if response.headers else {},
+            headers=resp_headers,
             status_code=response.status_code,
         )
 

@@ -226,6 +226,34 @@ class TestTunnelRoundTrip:
         for h in ("connection", "transfer-encoding", "keep-alive", "upgrade"):
             assert h not in forwarded_headers, f"{h} should not be forwarded"
 
+    async def test_response_strips_encoding_headers(self, connection_id: str) -> None:
+        """The server must not forward content-encoding/content-length from
+        the tunnel response — httpx has already decoded the body, so those
+        headers would misdescribe it and cause ERR_CONTENT_DECODING_FAILED.
+        Starlette re-adds content-length with the correct (decoded) size."""
+        resp, _ = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            response_headers=orjson.dumps(
+                {
+                    "content-encoding": "gzip",
+                    "content-length": "999",
+                    "transfer-encoding": "chunked",
+                    "x-tunnel": "ok",
+                }
+            ).decode(),
+        )
+        assert resp.status_code == 200
+        # Stripped: would misdescribe the decoded body
+        assert "content-encoding" not in resp.headers
+        assert "transfer-encoding" not in resp.headers
+        # content-length is re-added by Starlette with the correct size
+        # (not the fake "999" from the tunnel response)
+        assert resp.headers.get("content-length") != "999"
+        # Preserved: unrelated headers survive
+        assert resp.headers["x-tunnel"] == "ok"
+
 
 # ---------------------------------------------------------------------------
 # Disconnect behaviour

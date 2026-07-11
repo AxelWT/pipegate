@@ -1,0 +1,95 @@
+name: Deploy
+
+on:
+  push:
+    branches: [compatible-frontend]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build & push to ACR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: echo "tag=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Login to Aliyun ACR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_REGISTRY }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build & push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/pipegate:latest
+            ${{ secrets.ACR_REGISTRY }}/${{ secrets.ACR_NAMESPACE }}/pipegate:${{ steps.meta.outputs.tag }}
+
+  deploy:
+    name: Deploy to server
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble .env from secrets
+        env:
+          PIPEGATE_JWT_SECRET: ${{ secrets.PIPEGATE_JWT_SECRET }}
+          PIPEGATE_JWT_ALGORITHMS: ${{ vars.PIPEGATE_JWT_ALGORITHMS }}
+          PIPEGATE_BASE_DOMAIN: ${{ vars.PIPEGATE_BASE_DOMAIN }}
+        run: |
+          cat > .env <<EOF
+          PIPEGATE_JWT_SECRET=$PIPEGATE_JWT_SECRET
+          PIPEGATE_JWT_ALGORITHMS=$PIPEGATE_JWT_ALGORITHMS
+          PIPEGATE_BASE_DOMAIN=$PIPEGATE_BASE_DOMAIN
+          EOF
+
+      - name: Base64 encode .env for transfer
+        id: env_file
+        run: echo "b64=$(base64 -w 0 .env)" >> $GITHUB_OUTPUT
+
+      - name: Copy compose file
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          source: docker-compose.yml
+          target: ${{ secrets.DEPLOY_PATH || '/app/pipegate' }}
+          overwrite: true
+
+      - name: SSH deploy
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          ACR_REGISTRY: ${{ secrets.ACR_REGISTRY }}
+          ACR_NAMESPACE: ${{ secrets.ACR_NAMESPACE }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          ENV_FILE_B64: ${{ steps.env_file.outputs.b64 }}
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT || 22 }}
+          envs: ACR_REGISTRY,ACR_NAMESPACE,ACR_USERNAME,ACR_PASSWORD,ENV_FILE_B64
+          script: |
+            set -euo pipefail
+            cd ${{ secrets.DEPLOY_PATH || '/app/pipegate' }}
+            echo "$ENV_FILE_B64" | base64 -d > .env
+            docker login -u $ACR_USERNAME -p $ACR_PASSWORD $ACR_REGISTRY
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker image prune -f

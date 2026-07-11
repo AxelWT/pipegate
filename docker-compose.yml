@@ -1,0 +1,9 @@
+services:
+  pipegate:
+    image: ${ACR_REGISTRY}/${ACR_NAMESPACE}/pipegate:latest
+    container_name: pipegate
+    env_file:
+      - .env
+    ports:
+      - "8005:8000"
+    restart: unless-stopped

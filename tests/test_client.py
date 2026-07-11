@@ -39,6 +39,49 @@ class TestHandleRequest:
         assert base64.b64decode(resp.body) == b"ok"
         assert orjson.loads(resp.headers)["x-resp"] == "val"
 
+    async def test_strips_encoding_headers_from_response(self) -> None:
+        """httpx decompresses gzip/deflate and de-chunks transfer encoding
+        transparently. The forwarded headers must not claim content-encoding
+        or content-length that misdescribe the already-decoded body, or the
+        browser fails with ERR_CONTENT_DECODING_FAILED."""
+        import gzip
+
+        ws = AsyncMock()
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            url_path="api/data",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+        compressed = gzip.compress(b"plain-body")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda req: httpx.Response(
+                    200,
+                    content=compressed,
+                    headers={
+                        "content-encoding": "gzip",
+                        "content-length": str(len(compressed)),
+                        "content-type": "text/plain",
+                    },
+                )
+            )
+        ) as http_client:
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
+        forwarded = orjson.loads(resp.headers)
+        # Stripped: would misdescribe the decoded body
+        assert "content-encoding" not in forwarded
+        assert "content-length" not in forwarded
+        # Preserved: unrelated headers survive
+        assert forwarded["content-type"] == "text/plain"
+        # Body is the decompressed content, not the compressed bytes
+        assert base64.b64decode(resp.body) == b"plain-body"
+
     async def test_trailing_slash_in_target_does_not_double(self) -> None:
         ws = AsyncMock()
         request = BufferGateRequest(

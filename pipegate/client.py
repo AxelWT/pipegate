@@ -13,6 +13,19 @@ from .schemas import BufferGateRequest, BufferGateResponse
 _BACKOFF_BASE: float = 1.0
 _BACKOFF_MAX: float = 60.0
 
+# httpx transparently decompresses gzip/br/deflate and de-chunks transfer
+# encoding. These headers would misdescribe the already-decoded body, so
+# they must be stripped before forwarding (otherwise the browser sees
+# content-encoding: gzip on a plaintext body and fails with
+# ERR_CONTENT_DECODING_FAILED).
+_RESP_STRIP: frozenset[str] = frozenset(
+    {
+        "content-encoding",
+        "content-length",
+        "transfer-encoding",
+    }
+)
+
 
 async def handle_request(
     target: str,
@@ -30,7 +43,13 @@ async def handle_request(
         )
         payload = BufferGateResponse(
             correlation_id=request.correlation_id,
-            headers=orjson.dumps(dict(response.headers)).decode(),
+            headers=orjson.dumps(
+                {
+                    k: v
+                    for k, v in response.headers.items()
+                    if k.lower() not in _RESP_STRIP
+                }
+            ).decode(),
             body=base64.b64encode(response.content).decode(),
             status_code=response.status_code,
         )

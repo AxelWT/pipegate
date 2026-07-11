@@ -1,0 +1,17 @@
+.git/
+.venv/
+.github/
+.idea/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+tests/
+docs/
+*.md
+!README.md
+LICENSE
+.env
+.coverage
+.python-version
