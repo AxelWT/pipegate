@@ -84,7 +84,7 @@ async def _ws_roundtrip(
                 correlation_id=fwd["correlation_id"],
                 headers=response_headers
                 if response_headers is not None
-                else orjson.dumps({"x-tunnel": "ok"}).decode(),
+                else orjson.dumps([["x-tunnel", "ok"]]).decode(),
                 body=base64.b64encode(response_body).decode(),
                 status_code=response_status,
             )
@@ -223,8 +223,9 @@ class TestTunnelRoundTrip:
         )
         assert resp.status_code == 200
         forwarded_headers = orjson.loads(fwd["headers"])
+        forwarded_keys = {k for k, _ in forwarded_headers}
         for h in ("connection", "transfer-encoding", "keep-alive", "upgrade"):
-            assert h not in forwarded_headers, f"{h} should not be forwarded"
+            assert h not in forwarded_keys, f"{h} should not be forwarded"
 
     async def test_response_strips_encoding_headers(self, connection_id: str) -> None:
         """The server must not forward content-encoding/content-length from
@@ -236,12 +237,12 @@ class TestTunnelRoundTrip:
             connection_id,
             make_token(connection_id),
             response_headers=orjson.dumps(
-                {
-                    "content-encoding": "gzip",
-                    "content-length": "999",
-                    "transfer-encoding": "chunked",
-                    "x-tunnel": "ok",
-                }
+                [
+                    ["content-encoding", "gzip"],
+                    ["content-length", "999"],
+                    ["transfer-encoding", "chunked"],
+                    ["x-tunnel", "ok"],
+                ]
             ).decode(),
         )
         assert resp.status_code == 200
@@ -253,6 +254,35 @@ class TestTunnelRoundTrip:
         assert resp.headers.get("content-length") != "999"
         # Preserved: unrelated headers survive
         assert resp.headers["x-tunnel"] == "ok"
+
+    async def test_duplicate_set_cookie_headers_preserved(
+        self, connection_id: str
+    ) -> None:
+        """Multiple Set-Cookie headers must survive the tunnel.
+
+        A dict-based serialization silently drops duplicates (last wins),
+        which breaks the CSRF Double Submit pattern: login sets both
+        access_token and csrf_token via Set-Cookie, and losing either
+        cookie causes 403 on the next state-changing request. The
+        list-of-pairs wire format preserves both.
+        """
+        resp, _ = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            response_headers=orjson.dumps(
+                [
+                    ["set-cookie", "access_token=eyJabc; Path=/; HttpOnly"],
+                    ["set-cookie", "csrf_token=def456; Path=/"],
+                ]
+            ).decode(),
+        )
+        assert resp.status_code == 200
+        set_cookies = resp.headers.get_list("set-cookie")
+        assert len(set_cookies) == 2
+        values = " ".join(set_cookies)
+        assert "access_token=" in values
+        assert "csrf_token=" in values
 
 
 # ---------------------------------------------------------------------------
@@ -603,12 +633,12 @@ class TestEmptyHeadersHandling:
         )
         assert resp.status_code == 504
 
-    async def test_empty_json_object_headers_works(self, connection_id: str) -> None:
+    async def test_empty_json_array_headers_works(self, connection_id: str) -> None:
         resp, _ = await _ws_roundtrip(
             _make_app(),
             connection_id,
             make_token(connection_id),
-            response_headers="{}",
+            response_headers="[]",
             response_body=b"",
             response_status=504,
         )
@@ -620,7 +650,7 @@ class TestEmptyHeadersHandling:
 
         with pytest.raises(ValueError):
             orjson.loads("")
-        assert orjson.loads("{}") == {}
+        assert orjson.loads("[]") == []
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +698,7 @@ class TestQueueStability:
                 url_path="injected",
                 url_query="[]",
                 method="GET",
-                headers="{}",
+                headers="[]",
                 body="",
             )
         )
@@ -760,7 +790,7 @@ async def _ws_roundtrip_subdomain(
                 correlation_id=fwd["correlation_id"],
                 headers=response_headers
                 if response_headers is not None
-                else orjson.dumps({"x-tunnel": "ok"}).decode(),
+                else orjson.dumps([["x-tunnel", "ok"]]).decode(),
                 body=base64.b64encode(response_body).decode(),
                 status_code=response_status,
             )
@@ -848,7 +878,7 @@ class TestSubdomainRouting:
                 fwd = json.loads(cast(str, fwd_msg["text"]))
                 response = BufferGateResponse(
                     correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
                     body=base64.b64encode(b"ok").decode(),
                     status_code=200,
                 )
@@ -911,7 +941,7 @@ class TestSubdomainRouting:
                 fwd = json.loads(cast(str, fwd_msg["text"]))
                 response = BufferGateResponse(
                     correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
                     body=base64.b64encode(b"ok").decode(),
                     status_code=200,
                 )
@@ -979,7 +1009,7 @@ class TestSubdomainRouting:
                 fwd = json.loads(cast(str, fwd_msg["text"]))
                 response = BufferGateResponse(
                     correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
                     body=base64.b64encode(b"ok").decode(),
                     status_code=200,
                 )
@@ -1033,7 +1063,7 @@ class TestSubdomainRouting:
                 fwd = json.loads(cast(str, fwd_msg["text"]))
                 response = BufferGateResponse(
                     correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
                     body=base64.b64encode(b"ok").decode(),
                     status_code=200,
                 )

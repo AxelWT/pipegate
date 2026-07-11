@@ -152,12 +152,12 @@ def create_app() -> FastAPI:
                         list(request.query_params.multi_items())
                     ).decode(),
                     headers=orjson.dumps(
-                        {
-                            k: v
-                            for k, v in request.headers.items()
-                            if k.lower() not in _HOP_BY_HOP
-                        }
-                        | {"x-pipegate-correlation-id": correlation_id.hex}
+                        [
+                            [k.decode("latin-1"), v.decode("latin-1")]
+                            for k, v in request.headers.raw
+                            if k.decode("latin-1").lower() not in _HOP_BY_HOP
+                        ]
+                        + [["x-pipegate-correlation-id", correlation_id.hex]]
                     ).decode(),
                     body=base64.b64encode(raw_body).decode(),
                 )
@@ -189,17 +189,32 @@ def create_app() -> FastAPI:
             if request.method == "HEAD"
             else (base64.b64decode(response.body) if response.body else b"")
         )
-        resp_headers = orjson.loads(response.headers) if response.headers else {}
+        resp_raw = orjson.loads(response.headers) if response.headers else []
         # Defensive: even if a client failed to strip these, the server must
         # not forward content-encoding/content-length that misdescribe the
         # already-decoded body (would cause ERR_CONTENT_DECODING_FAILED).
-        for h in ("content-encoding", "content-length", "transfer-encoding"):
-            resp_headers.pop(h, None)
-        return Response(
+        _stripped = {"content-encoding", "content-length", "transfer-encoding"}
+        # Build a dict for unique keys (Starlette Response needs a Mapping);
+        # collect duplicate-key headers (e.g. multiple Set-Cookie) to append
+        # after construction so they survive instead of being silently merged.
+        unique_headers: dict[str, str] = {}
+        duplicate_headers: list[tuple[str, str]] = []
+        for k, v in resp_raw:
+            kl = k.lower()
+            if kl in _stripped:
+                continue
+            if kl in unique_headers:
+                duplicate_headers.append((k, v))
+            else:
+                unique_headers[kl] = v
+        resp = Response(
             content=response_content,
-            headers=resp_headers,
+            headers=unique_headers,
             status_code=response.status_code,
         )
+        for k, v in duplicate_headers:
+            resp.headers.append(k, v)
+        return resp
 
     @app.websocket("/")
     async def handle_websocket(

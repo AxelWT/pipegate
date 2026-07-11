@@ -44,11 +44,11 @@ async def handle_request(
         payload = BufferGateResponse(
             correlation_id=request.correlation_id,
             headers=orjson.dumps(
-                {
-                    k: v
-                    for k, v in response.headers.items()
+                [
+                    [k, v]
+                    for k, v in response.headers.multi_items()
                     if k.lower() not in _RESP_STRIP
-                }
+                ]
             ).decode(),
             body=base64.b64encode(response.content).decode(),
             status_code=response.status_code,
@@ -60,7 +60,7 @@ async def handle_request(
         )
         payload = BufferGateResponse(
             correlation_id=request.correlation_id,
-            headers="{}",
+            headers="[]",
             body="",
             status_code=504,
         )

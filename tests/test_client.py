@@ -21,7 +21,7 @@ class TestHandleRequest:
             url_path="api/data",
             url_query=orjson.dumps([["key", "value"]]).decode(),
             method="GET",
-            headers=orjson.dumps({"x-custom": "header"}).decode(),
+            headers=orjson.dumps([["x-custom", "header"]]).decode(),
             body="",
         )
 
@@ -37,7 +37,7 @@ class TestHandleRequest:
         assert resp.correlation_id == request.correlation_id
         assert resp.status_code == 200
         assert base64.b64decode(resp.body) == b"ok"
-        assert orjson.loads(resp.headers)["x-resp"] == "val"
+        assert any(k == "x-resp" and v == "val" for k, v in orjson.loads(resp.headers))
 
     async def test_strips_encoding_headers_from_response(self) -> None:
         """httpx decompresses gzip/deflate and de-chunks transfer encoding
@@ -52,7 +52,7 @@ class TestHandleRequest:
             url_path="api/data",
             url_query=orjson.dumps([]).decode(),
             method="GET",
-            headers=orjson.dumps({}).decode(),
+            headers=orjson.dumps([]).decode(),
             body="",
         )
 
@@ -74,11 +74,12 @@ class TestHandleRequest:
 
         resp = BufferGateResponse.model_validate_json(ws.send.call_args[0][0])
         forwarded = orjson.loads(resp.headers)
+        forwarded_keys = {k for k, _ in forwarded}
         # Stripped: would misdescribe the decoded body
-        assert "content-encoding" not in forwarded
-        assert "content-length" not in forwarded
+        assert "content-encoding" not in forwarded_keys
+        assert "content-length" not in forwarded_keys
         # Preserved: unrelated headers survive
-        assert forwarded["content-type"] == "text/plain"
+        assert any(k == "content-type" and v == "text/plain" for k, v in forwarded)
         # Body is the decompressed content, not the compressed bytes
         assert base64.b64decode(resp.body) == b"plain-body"
 
@@ -89,7 +90,7 @@ class TestHandleRequest:
             url_path="api/data",
             url_query=orjson.dumps([]).decode(),
             method="GET",
-            headers=orjson.dumps({}).decode(),
+            headers=orjson.dumps([]).decode(),
             body="",
         )
         captured: list[str] = []
@@ -113,7 +114,7 @@ class TestHandleRequest:
             url_path="upload",
             url_query=orjson.dumps([]).decode(),
             method="POST",
-            headers=orjson.dumps({}).decode(),
+            headers=orjson.dumps([]).decode(),
             body=base64.b64encode(binary).decode(),
         )
 
@@ -140,7 +141,7 @@ class TestHandleRequest:
             url_path="api/data",
             url_query=orjson.dumps([]).decode(),
             method="GET",
-            headers=orjson.dumps({}).decode(),
+            headers=orjson.dumps([]).decode(),
             body="",
         )
 
@@ -171,7 +172,7 @@ class TestHandleRequest:
             url_path="api/data",
             url_query=orjson.dumps([]).decode(),
             method="GET",
-            headers=orjson.dumps({}).decode(),
+            headers=orjson.dumps([]).decode(),
             body="",
         )
 
@@ -187,7 +188,7 @@ class TestHandleRequest:
         assert resp.status_code == 504
         # Must be parseable JSON — orjson.loads("") raises JSONDecodeError
         parsed = orjson.loads(resp.headers)
-        assert parsed == {}
+        assert parsed == []
 
     async def test_send_failure_does_not_raise(self) -> None:
         """If the WebSocket is closed when sending the response, handle_request
@@ -199,7 +200,7 @@ class TestHandleRequest:
             url_path="api/data",
             url_query=orjson.dumps([]).decode(),
             method="GET",
-            headers=orjson.dumps({}).decode(),
+            headers=orjson.dumps([]).decode(),
             body="",
         )
 

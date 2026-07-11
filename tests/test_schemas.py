@@ -13,9 +13,9 @@ class TestBufferGateRequest:
         req = BufferGateRequest(
             correlation_id=uuid.uuid4(),
             url_path="/hello",
-            url_query="{}",
+            url_query="[]",
             method="GET",
-            headers="{}",
+            headers="[]",
             body="",
         )
         assert BufferGateRequest.model_validate_json(req.model_dump_json()) == req
@@ -25,9 +25,9 @@ class TestBufferGateRequest:
             BufferGateRequest(
                 correlation_id=uuid.uuid4(),
                 url_path="/",
-                url_query="{}",
+                url_query="[]",
                 method="INVALID",
-                headers="{}",
+                headers="[]",
                 body="",
             )
 
@@ -36,7 +36,7 @@ class TestBufferGateResponse:
     def test_roundtrip_json(self) -> None:
         resp = BufferGateResponse(
             correlation_id=uuid.uuid4(),
-            headers='{"content-type": "text/plain"}',
+            headers='[["content-type", "text/plain"]]',
             body="ok",
             status_code=200,
         )
@@ -46,7 +46,7 @@ class TestBufferGateResponse:
         with pytest.raises(ValidationError):
             BufferGateResponse(
                 correlation_id=uuid.uuid4(),
-                headers="{}",
+                headers="[]",
                 body="ok",
             )  # type: ignore[call-arg]
 
