@@ -257,6 +257,9 @@ def create_app() -> FastAPI:
             {receive_task, send_task},
             return_when=asyncio.FIRST_COMPLETED,
         )
+        for task in _done:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                task.result()
         for task in pending:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
