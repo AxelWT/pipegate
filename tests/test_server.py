@@ -379,6 +379,24 @@ class TestBodySizeLimit:
 
         assert resp.status_code == 413
 
+    async def test_oversized_body_rejected_early_via_content_length(
+        self, connection_id: str
+    ) -> None:
+        """Content-Length exceeding the limit must be rejected before reading
+        the body, so a huge upload doesn't consume memory."""
+        app = _make_app()
+        app.extra["settings"].max_body_bytes = 10
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                f"/{connection_id}/upload",
+                content=b"x" * 10000,
+                headers={"content-length": "10000"},
+            )
+
+        assert resp.status_code == 413
+
 
 # ---------------------------------------------------------------------------
 # Queue backpressure

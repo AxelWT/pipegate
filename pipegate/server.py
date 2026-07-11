@@ -103,12 +103,16 @@ def create_app() -> FastAPI:
         )
         correlation_id = uuid.uuid4()
 
-        raw_body = await request.body()
-        if len(raw_body) > settings.max_body_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Request body exceeds limit of {settings.max_body_bytes} bytes",
-            )
+        body_buf = bytearray()
+        limit = settings.max_body_bytes
+        async for chunk in request.stream():
+            body_buf.extend(chunk)
+            if len(body_buf) > limit:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Request body exceeds limit of {limit} bytes",
+                )
+        raw_body = bytes(body_buf)
 
         future: asyncio.Future[BufferGateResponse] = asyncio.Future()
         futures[correlation_id] = future
