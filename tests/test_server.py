@@ -299,6 +299,49 @@ class TestDisconnect:
         buffers: dict[str, object] = app.extra.get("buffers", {})
         assert connection_id not in buffers
 
+    async def test_pending_future_fails_with_502_on_disconnect(
+        self, connection_id: str
+    ) -> None:
+        """A pending request must resolve with 502 (not hang for 300s -> 504)
+        when the tunnel client disconnects via the receive path."""
+        app = _make_app()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+
+            msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            assert msg["type"] == "websocket.accept"
+
+            await asyncio.sleep(0.01)
+
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/pending"))
+            await asyncio.sleep(0.05)
+
+            # Disconnect without ever sending a response. The receive() loop
+            # exits; the pending future must be failed with 502 promptly.
+            await inbox.put({"type": "websocket.disconnect"})
+
+            resp = await asyncio.wait_for(http_task, timeout=5)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        assert resp.status_code == 502
+
 
 # ---------------------------------------------------------------------------
 # WebSocket authentication

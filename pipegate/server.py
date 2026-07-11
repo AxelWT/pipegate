@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 def create_app() -> FastAPI:
     buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
+    pending_by_conn: dict[str, set[uuid.UUID]] = {}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -76,6 +77,7 @@ def create_app() -> FastAPI:
 
         future: asyncio.Future[BufferGateResponse] = asyncio.Future()
         futures[correlation_id] = future
+        pending_by_conn.setdefault(connection_id, set()).add(correlation_id)
 
         if connection_id not in buffers:
             buffers[connection_id] = asyncio.Queue(maxsize=settings.max_queue_depth)
@@ -101,6 +103,7 @@ def create_app() -> FastAPI:
             )
         except asyncio.QueueFull:
             futures.pop(correlation_id, None)
+            pending_by_conn.get(connection_id, set()).discard(correlation_id)
             raise HTTPException(
                 status_code=503,
                 detail="Queue full — tunnel client is too slow or not connected",
@@ -113,6 +116,7 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=504, detail="Gateway Timeout") from e
         finally:
             futures.pop(correlation_id, None)
+            pending_by_conn.get(connection_id, set()).discard(correlation_id)
 
         response_content = (
             b""
@@ -198,5 +202,14 @@ def create_app() -> FastAPI:
 
         logger.info("WebSocket disconnected: %s", connection_id)
         buffers.pop(connection_id, None)
+        for cid in pending_by_conn.pop(connection_id, set()):
+            fut = futures.pop(cid, None)
+            if fut and not fut.done():
+                fut.set_exception(
+                    HTTPException(
+                        status_code=502,
+                        detail="Tunnel client disconnected",
+                    )
+                )
 
     return app
