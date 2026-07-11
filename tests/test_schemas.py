@@ -5,7 +5,7 @@ import uuid
 import pytest
 from pydantic import ValidationError
 
-from pipegate.schemas import BufferGateRequest, BufferGateResponse, JWTPayload
+from pipegate.schemas import BufferGateRequest, BufferGateResponse, JWTPayload, Settings
 
 
 class TestBufferGateRequest:
@@ -67,3 +67,13 @@ class TestJWTPayload:
     def test_missing_sub(self) -> None:
         with pytest.raises(ValidationError):
             JWTPayload(exp=9999999999)  # type: ignore[call-arg]
+
+
+class TestSettings:
+    def test_empty_algorithms_rejected(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("PIPEGATE_JWT_ALGORITHMS", "[]")
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_algorithms_populated(self, settings: Settings) -> None:
+        assert settings.jwt_algorithms == ["HS256"]

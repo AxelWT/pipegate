@@ -48,7 +48,7 @@ class Settings(BaseSettings):
 
     connection_id: str | None = Field(alias="PIPEGATE_CONNECTION_ID", default=None)
     jwt_secret: SecretStr = Field(alias="PIPEGATE_JWT_SECRET")
-    jwt_algorithms: list[str] = Field(alias="PIPEGATE_JWT_ALGORITHMS")
+    jwt_algorithms: list[str] = Field(alias="PIPEGATE_JWT_ALGORITHMS", min_length=1)
     jwt_issuer: str = Field(alias="PIPEGATE_JWT_ISSUER", default="pipegate")
     jwt_audience: str = Field(alias="PIPEGATE_JWT_AUDIENCE", default="pipegate")
     jwt_ttl_days: int = Field(alias="PIPEGATE_JWT_TTL_DAYS", default=21)
