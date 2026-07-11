@@ -110,13 +110,32 @@ Environment variables via pydantic-settings:
 | `PIPEGATE_CONNECTION_ID` | No | random UUID | Pin a specific connection ID when generating tokens |
 | `PIPEGATE_MAX_BODY_BYTES` | No | 10 MB | Reject requests larger than this (413) |
 | `PIPEGATE_MAX_QUEUE_DEPTH` | No | 100 | Per-tunnel queue size before returning 503 |
+| `PIPEGATE_BASE_DOMAIN` | No | -- | Enable subdomain routing (see below) |
+
+## Subdomain Routing
+
+By default, PipeGate routes by path prefix: `http://server/{connection_id}/{path}`. This breaks frontends whose HTML references absolute asset paths like `/static/main.js` — the prefix is lost and the asset 404s.
+
+Set `PIPEGATE_BASE_DOMAIN` to route by **subdomain** instead. The connection_id is taken from the leftmost label of the `Host` header, and the full path is forwarded as-is — so absolute paths work without any frontend changes:
+
+```
+export PIPEGATE_BASE_DOMAIN="tunnel.example.com"
+pipegate server
+
+# Pin a connection id, then access via subdomain:
+#   http://myapp.tunnel.example.com/            -> forwards /         to myapp
+#   http://myapp.tunnel.example.com/static/main.js -> forwards /static/main.js (works!)
+```
+
+This requires wildcard DNS (`*.tunnel.example.com -> your server IP`) and, for HTTPS, a wildcard TLS certificate. Path-based routing still works when `PIPEGATE_BASE_DOMAIN` is unset — the two modes are mutually exclusive per deployment.
 
 ## Endpoints
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | `GET` | `/healthz` | None | Returns `{"status": "ok"}` |
-| `*` | `/{connection_id}/{path}` | None | Tunnel passthrough (all standard HTTP methods) |
+| `*` | `/{connection_id}/{path}` | None | Tunnel passthrough (path mode, default) |
+| `*` | `/{path}` | None | Tunnel passthrough (subdomain mode, Host: `{cid}.{base_domain}`) |
 | `WS` | `/?token=<jwt>` | JWT | Tunnel client connection |
 
 ## Design Notes

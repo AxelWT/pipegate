@@ -573,3 +573,233 @@ class TestQueueStability:
         assert not received_from_replacement, (
             "send() read from a replacement queue — it must use the captured queue ref"
         )
+
+
+# ---------------------------------------------------------------------------
+# Subdomain routing (PIPEGATE_BASE_DOMAIN)
+# ---------------------------------------------------------------------------
+
+
+BASE_DOMAIN = "tunnel.example.com"
+
+
+def _make_subdomain_app() -> FastAPI:
+    app = create_app()
+    settings = Settings()
+    settings.base_domain = BASE_DOMAIN
+    app.extra["settings"] = settings
+    return app
+
+
+async def _ws_roundtrip_subdomain(
+    app: FastAPI,
+    connection_id: str,
+    token: str,
+    *,
+    method: str = "GET",
+    path: str = "test-path",
+    body: str = "",
+    query: str = "",
+    response_body: bytes = b"tunnel-response",
+    response_status: int = 200,
+    response_headers: str | None = None,
+) -> tuple[Response, dict[str, str]]:
+    """Full tunnel round-trip in subdomain mode: connection_id comes from
+    the Host header, the full path is forwarded as-is."""
+    transport = ASGITransport(app=app)
+    base_url = f"http://{connection_id}.{BASE_DOMAIN}"
+
+    url = f"/{path}" if path else "/"
+    if query:
+        url += f"?{query}"
+
+    forwarded_request: dict[str, str] = {}
+
+    async with AsyncClient(transport=transport, base_url=base_url) as client:
+
+        async def http_request() -> Response:
+            return await client.request(method, url, content=body)
+
+        async def ws_client() -> None:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put),  # type: ignore[arg-type]
+            )
+
+            msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            assert msg["type"] == "websocket.accept"
+
+            msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            assert msg["type"] == "websocket.send"
+
+            fwd = json.loads(cast(str, msg["text"]))
+            forwarded_request.update(fwd)
+
+            response = BufferGateResponse(
+                correlation_id=fwd["correlation_id"],
+                headers=response_headers
+                if response_headers is not None
+                else orjson.dumps({"x-tunnel": "ok"}).decode(),
+                body=base64.b64encode(response_body).decode(),
+                status_code=response_status,
+            )
+            await inbox.put(
+                {"type": "websocket.receive", "text": response.model_dump_json()}
+            )
+
+            await asyncio.sleep(0.05)
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        ws_task = asyncio.create_task(ws_client())
+        await asyncio.sleep(0.01)
+        http_task = asyncio.create_task(http_request())
+
+        await ws_task
+        resp = await asyncio.wait_for(http_task, timeout=10)
+
+    return resp, forwarded_request
+
+
+class TestSubdomainRouting:
+    async def test_get_forwards_full_path(self, connection_id: str) -> None:
+        resp, fwd = await _ws_roundtrip_subdomain(
+            _make_subdomain_app(),
+            connection_id,
+            make_token(connection_id),
+            path="api/data",
+        )
+        assert resp.status_code == 200
+        assert fwd["method"] == "GET"
+        # connection_id must NOT appear in forwarded path
+        assert fwd["url_path"] == "api/data"
+
+    async def test_absolute_asset_path_works(self, connection_id: str) -> None:
+        """The whole point: /static/main.js reaches the tunnel without a cid prefix."""
+        resp, fwd = await _ws_roundtrip_subdomain(
+            _make_subdomain_app(),
+            connection_id,
+            make_token(connection_id),
+            path="static/js/main.js",
+        )
+        assert resp.status_code == 200
+        assert fwd["url_path"] == "static/js/main.js"
+
+    async def test_root_path(self, connection_id: str) -> None:
+        resp, fwd = await _ws_roundtrip_subdomain(
+            _make_subdomain_app(),
+            connection_id,
+            make_token(connection_id),
+            path="",
+        )
+        assert resp.status_code == 200
+        assert fwd["url_path"] == ""
+
+    async def test_host_with_port_stripped(self, connection_id: str) -> None:
+        """Host: cid.tunnel.example.com:8000 must still resolve the cid."""
+        app = _make_subdomain_app()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+        # base_url with port -> Host header includes :8000
+        base_url = f"http://{connection_id}.{BASE_DOMAIN}:8000"
+
+        async with AsyncClient(transport=transport, base_url=base_url) as client:
+
+            async def ws_client() -> None:
+                scope: dict[str, object] = {
+                    "type": "websocket",
+                    "asgi": {"version": "3.0"},
+                    "http_version": "1.1",
+                    "path": "/",
+                    "query_string": f"token={token}".encode(),
+                    "headers": [],
+                }
+                inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+                await inbox.put({"type": "websocket.connect"})
+                app_task = asyncio.create_task(
+                    app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+                )
+                msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                assert msg["type"] == "websocket.accept"
+                fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+                fwd = json.loads(cast(str, fwd_msg["text"]))
+                response = BufferGateResponse(
+                    correlation_id=fwd["correlation_id"],
+                    headers=orjson.dumps({"x-tunnel": "ok"}).decode(),
+                    body=base64.b64encode(b"ok").decode(),
+                    status_code=200,
+                )
+                await inbox.put(
+                    {"type": "websocket.receive", "text": response.model_dump_json()}
+                )
+                await asyncio.sleep(0.05)
+                await inbox.put({"type": "websocket.disconnect"})
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(app_task, timeout=2)
+
+            ws_task = asyncio.create_task(ws_client())
+            await asyncio.sleep(0.01)
+            http_task = asyncio.create_task(client.get("/api/data"))
+
+            await ws_task
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+        assert resp.status_code == 200
+        assert resp.text == "ok"
+
+    async def test_non_subdomain_host_rejected(self, connection_id: str) -> None:
+        """When base_domain is set, a host that isn't a subdomain returns 400."""
+        app = _make_subdomain_app()
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/data")
+
+        assert resp.status_code == 400
+
+    async def test_query_params_preserved(self, connection_id: str) -> None:
+        resp, fwd = await _ws_roundtrip_subdomain(
+            _make_subdomain_app(),
+            connection_id,
+            make_token(connection_id),
+            query="a=1&a=2&b=3",
+        )
+        assert resp.status_code == 200
+        query = json.loads(fwd["url_query"])
+        a_vals = sorted(v for k, v in query if k == "a")
+        assert a_vals == ["1", "2"]
+
+
+class TestPathModeBackwardCompat:
+    """Without PIPEGATE_BASE_DOMAIN, path-based routing works as before."""
+
+    async def test_path_mode_still_works(self, connection_id: str) -> None:
+        # _make_app uses default Settings (base_domain=None)
+        resp, fwd = await _ws_roundtrip(
+            _make_app(), connection_id, make_token(connection_id)
+        )
+        assert resp.status_code == 200
+        assert fwd["url_path"] == "test-path"
+
+    async def test_path_mode_static_asset(self, connection_id: str) -> None:
+        resp, fwd = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            path="static/main.js",
+        )
+        assert resp.status_code == 200
+        assert fwd["url_path"] == "static/main.js"

@@ -60,3 +60,4 @@ class Settings(BaseSettings):
         alias="PIPEGATE_MAX_QUEUE_DEPTH",
         default=100,
     )
+    base_domain: str | None = Field(alias="PIPEGATE_BASE_DOMAIN", default=None)

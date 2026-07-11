@@ -31,6 +31,38 @@ from .schemas import (
 logger = logging.getLogger(__name__)
 
 
+def _resolve_target(
+    full_path: str, host: str | None, settings: Settings
+) -> tuple[str, str]:
+    """Resolve (connection_id, path) for an inbound HTTP request.
+
+    Subdomain mode (PIPEGATE_BASE_DOMAIN set): the connection_id is taken
+    from the leftmost label of the Host header (port stripped), and the
+    full request path is forwarded as-is — so absolute asset paths like
+    ``/static/main.js`` work without a prefix.
+
+    Path mode (default, backwards compatible): the first path segment is
+    the connection_id and the remainder is forwarded.
+    """
+    if settings.base_domain:
+        base = "." + settings.base_domain
+        host_no_port = (host or "").split(":", 1)[0]
+        if host_no_port.endswith(base) and len(host_no_port) > len(base):
+            connection_id = host_no_port[: -len(base)]
+            return connection_id, full_path
+        raise HTTPException(
+            status_code=400,
+            detail=f"Host must be a subdomain of {settings.base_domain}",
+        )
+
+    parts = full_path.split("/", 1)
+    connection_id = parts[0]
+    path = parts[1] if len(parts) > 1 else ""
+    if not connection_id:
+        raise HTTPException(status_code=404, detail="Connection id required")
+    return connection_id, path
+
+
 def create_app() -> FastAPI:
     buffers: dict[str, asyncio.Queue[BufferGateRequest]] = {}
     futures: dict[uuid.UUID, asyncio.Future[BufferGateResponse]] = {}
@@ -57,15 +89,17 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     @app.api_route(
-        "/{connection_id}/{path_slug:path}",
+        "/{full_path:path}",
         methods=list(get_args(Methods)),
     )
     async def handle_http_request(
-        connection_id: str,
         request: Request,
-        path_slug: str = "",
+        full_path: str = "",
     ) -> Response:
         settings: Settings = request.app.extra["settings"]
+        connection_id, path_slug = _resolve_target(
+            full_path, request.headers.get("host"), settings
+        )
         correlation_id = uuid.uuid4()
 
         raw_body = await request.body()
