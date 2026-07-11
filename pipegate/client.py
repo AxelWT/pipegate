@@ -84,7 +84,8 @@ async def main(target_url: str, server_url: str) -> None:
                         except asyncio.CancelledError:
                             raise
                         except Exception as e:
-                            print(f"Error receiving message: {e}", file=sys.stderr)
+                            print(f"Connection lost: {e}", file=sys.stderr)
+                            break
         except asyncio.CancelledError:
             raise
         except (ConnectionRefusedError, OSError) as e:

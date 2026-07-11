@@ -147,3 +147,32 @@ class TestMainReconnect:
             await main("http://localhost:9000", "ws://fake:8000/conn")
 
         assert call_count >= 2
+
+    async def test_reconnects_when_established_connection_drops(self) -> None:
+        """A dropped established connection must trigger reconnection,
+        not a busy-loop of repeated recv() failures."""
+        from websockets.exceptions import ConnectionClosed
+
+        call_count = 0
+        ws_mock = AsyncMock()
+
+        async def side_effect(*a: object, **kw: object) -> AsyncMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                ws_mock.recv = AsyncMock(side_effect=ConnectionClosed(None, None))
+                return ws_mock
+            raise asyncio.CancelledError()
+
+        connect_cm = AsyncMock()
+        connect_cm.__aenter__ = side_effect
+        connect_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            contextlib.suppress(asyncio.CancelledError),
+            patch("pipegate.client.connect", return_value=connect_cm),
+            patch("pipegate.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            await main("http://localhost:9000", "ws://fake:8000/conn")
+
+        assert call_count >= 2
