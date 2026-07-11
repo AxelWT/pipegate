@@ -23,7 +23,7 @@ async def handle_request(
     try:
         response = await http_client.request(
             method=request.method,
-            url=f"{target}/{request.url_path}",
+            url=f"{target.rstrip('/')}/{request.url_path}",
             headers=orjson.loads(request.headers),
             params=orjson.loads(request.url_query),
             content=base64.b64decode(request.body) if request.body else b"",

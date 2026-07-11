@@ -39,6 +39,29 @@ class TestHandleRequest:
         assert base64.b64decode(resp.body) == b"ok"
         assert orjson.loads(resp.headers)["x-resp"] == "val"
 
+    async def test_trailing_slash_in_target_does_not_double(self) -> None:
+        ws = AsyncMock()
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            url_path="api/data",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+        captured: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(str(req.url))
+            return httpx.Response(200, text="ok")
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as http_client:
+            await handle_request("http://localhost:9000/", request, http_client, ws)
+
+        assert captured[0] == "http://localhost:9000/api/data"
+
     async def test_post_with_binary_body(self) -> None:
         ws = AsyncMock()
         binary = bytes(range(256))
