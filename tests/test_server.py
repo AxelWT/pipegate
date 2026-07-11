@@ -213,6 +213,19 @@ class TestTunnelRoundTrip:
         assert resp.status_code == 200
         assert resp.content == b""
 
+    async def test_hop_by_hop_headers_not_forwarded(self, connection_id: str) -> None:
+        resp, fwd = await _ws_roundtrip(
+            _make_app(),
+            connection_id,
+            make_token(connection_id),
+            method="POST",
+            body="hello",
+        )
+        assert resp.status_code == 200
+        forwarded_headers = orjson.loads(fwd["headers"])
+        for h in ("connection", "transfer-encoding", "keep-alive", "upgrade"):
+            assert h not in forwarded_headers, f"{h} should not be forwarded"
+
 
 # ---------------------------------------------------------------------------
 # Disconnect behaviour

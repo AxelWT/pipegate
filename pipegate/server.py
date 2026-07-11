@@ -30,6 +30,21 @@ from .schemas import (
 
 logger = logging.getLogger(__name__)
 
+_HOP_BY_HOP: frozenset[str] = frozenset(
+    {
+        "connection",
+        "content-length",
+        "host",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+    }
+)
+
 
 def _resolve_target(
     full_path: str, host: str | None, settings: Settings
@@ -133,9 +148,11 @@ def create_app() -> FastAPI:
                     ).decode(),
                     headers=orjson.dumps(
                         {
-                            **dict(request.headers),
-                            "x-pipegate-correlation-id": correlation_id.hex,
+                            k: v
+                            for k, v in request.headers.items()
+                            if k.lower() not in _HOP_BY_HOP
                         }
+                        | {"x-pipegate-correlation-id": correlation_id.hex}
                     ).decode(),
                     body=base64.b64encode(raw_body).decode(),
                 )
