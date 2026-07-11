@@ -16,6 +16,8 @@ Expose a local server to the internet through a single WebSocket. No accounts, n
 
 ## Quick Start
 
+> 代理前端页面遇到静态资源 404？请参阅 [使用指南](docs/USAGE.md#子域名模式解决前端静态资源-404) 中的子域名模式。
+
 ```bash
 git clone https://github.com/janbjorge/pipegate.git && cd pipegate
 uv sync
