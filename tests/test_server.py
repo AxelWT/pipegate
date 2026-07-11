@@ -421,6 +421,52 @@ class TestHealth:
         assert resp.json() == {"status": "ok"}
 
 
+class TestLifespanShutdown:
+    async def test_shutdown_tolerates_concurrent_future_pop(self) -> None:
+        """Lifespan shutdown iterates futures; a concurrent request finally-block
+        popping its correlation_id must not raise RuntimeError about dict
+        changing size during iteration."""
+        app = create_app()
+        settings = Settings()
+        app.extra["settings"] = settings
+
+        # Access the closure-captured dicts via app.extra where exposed, but
+        # futures is not exposed — drive a real pending request instead.
+        transport = ASGITransport(app=app)
+        token = make_token("shutdown-test")
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            assert msg["type"] == "websocket.accept"
+
+            # Start a pending HTTP request (no response will come)
+            http_task = asyncio.create_task(client.get("/shutdown-test/pending"))
+            await asyncio.sleep(0.05)
+
+            # Disconnect the tunnel — pending future resolves to 502 quickly,
+            # which pops the futures dict. The http finally-block runs.
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+        assert resp.status_code == 502
+
+
 # ---------------------------------------------------------------------------
 # PR #24: empty headers in WS error response
 # ---------------------------------------------------------------------------

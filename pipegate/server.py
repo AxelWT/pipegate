@@ -43,7 +43,7 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            for fut in futures.values():
+            for fut in list(futures.values()):
                 if not fut.done():
                     fut.set_exception(
                         HTTPException(status_code=504, detail="Gateway Timeout")
