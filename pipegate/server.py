@@ -63,7 +63,8 @@ def _resolve_target(
         base = "." + settings.base_domain.lstrip(".")
         host_no_port = (host or "").split(":", 1)[0].lower()
         if host_no_port.endswith(base) and len(host_no_port) > len(base):
-            connection_id = host_no_port[: -len(base)]
+            prefix = host_no_port[: -len(base)]
+            connection_id = prefix.split(".", 1)[0]
             return connection_id, full_path
         raise HTTPException(
             status_code=400,
