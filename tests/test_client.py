@@ -123,6 +123,28 @@ class TestHandleRequest:
         parsed = orjson.loads(resp.headers)
         assert parsed == {}
 
+    async def test_send_failure_does_not_raise(self) -> None:
+        """If the WebSocket is closed when sending the response, handle_request
+        must not raise — the server-side disconnect handling takes over."""
+        ws = AsyncMock()
+        ws.send = AsyncMock(side_effect=RuntimeError("connection closed"))
+        request = BufferGateRequest(
+            correlation_id=uuid.uuid4(),
+            url_path="api/data",
+            url_query=orjson.dumps([]).decode(),
+            method="GET",
+            headers=orjson.dumps({}).decode(),
+            body="",
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, text="ok"))
+        ) as http_client:
+            # Must not raise
+            await handle_request("http://localhost:9000", request, http_client, ws)
+
+        ws.send.assert_awaited_once()
+
 
 class TestMainReconnect:
     async def test_retries_on_connection_refused(self) -> None:

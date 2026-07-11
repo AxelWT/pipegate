@@ -46,7 +46,13 @@ async def handle_request(
             status_code=504,
         )
 
-    await ws_client.send(payload.model_dump_json())
+    try:
+        await ws_client.send(payload.model_dump_json())
+    except Exception as e:
+        print(
+            f"Failed to send response for {request.correlation_id}: {e}",
+            file=sys.stderr,
+        )
 
 
 async def main(target_url: str, server_url: str) -> None:
