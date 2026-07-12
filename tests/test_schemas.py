@@ -77,3 +77,11 @@ class TestSettings:
 
     def test_algorithms_populated(self, settings: Settings) -> None:
         assert settings.jwt_algorithms == ["HS256"]
+
+    def test_algorithms_defaults_to_hs256(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("PIPEGATE_JWT_SECRET", "test-secret-that-is-long-enough!")
+        monkeypatch.delenv("PIPEGATE_JWT_ALGORITHMS", raising=False)
+        s = Settings()
+        assert s.jwt_algorithms == ["HS256"]

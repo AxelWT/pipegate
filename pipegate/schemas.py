@@ -35,7 +35,7 @@ class BufferGateResponse(BaseModel):
 
 class JWTPayload(BaseModel):
     sub: str  # connection_id
-    exp: int  # expiry (unix)
+    exp: int | None = None  # expiry (unix); None = never expires
     nbf: int  # not before (unix)
     iat: int  # issued at (unix)
     iss: str  # issuer
@@ -44,14 +44,16 @@ class JWTPayload(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(cli_parse_args=False)
+    model_config = SettingsConfigDict(cli_parse_args=False, populate_by_name=True)
 
     connection_id: str | None = Field(alias="PIPEGATE_CONNECTION_ID", default=None)
     jwt_secret: SecretStr = Field(alias="PIPEGATE_JWT_SECRET")
-    jwt_algorithms: list[str] = Field(alias="PIPEGATE_JWT_ALGORITHMS", min_length=1)
+    jwt_algorithms: list[str] = Field(
+        alias="PIPEGATE_JWT_ALGORITHMS", default=["HS256"], min_length=1
+    )
     jwt_issuer: str = Field(alias="PIPEGATE_JWT_ISSUER", default="pipegate")
     jwt_audience: str = Field(alias="PIPEGATE_JWT_AUDIENCE", default="pipegate")
-    jwt_ttl_days: int = Field(alias="PIPEGATE_JWT_TTL_DAYS", default=21)
+    jwt_ttl_days: int | None = Field(alias="PIPEGATE_JWT_TTL_DAYS", default=None)
     max_body_bytes: int = Field(
         alias="PIPEGATE_MAX_BODY_BYTES",
         default=10 * 1024 * 1024,

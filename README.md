@@ -25,25 +25,48 @@ uv sync
 export PIPEGATE_JWT_SECRET="change-me-to-something-secret"
 export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
 
-# Generate a tunnel token (21-day expiry)
-pipegate token
-# Connection-id: a1b2c3d4...
-# JWT Bearer:    eyJhbGci...
-
 # Run the server (on your public VPS)
 pipegate server
 
-# Run the client (on your local machine, another terminal)
+# Run the client (on your local machine)
 pipegate client http://localhost:3000 "ws://yourserver:8000/?token=<jwt>"
 ```
 
 Requests to `http://yourserver:8000/a1b2c3d4/anything` now reach `http://localhost:3000/anything`.
+
+### One-command tunnels with `pipegate connect`
+
+The flow above requires generating a token and copy-pasting the JWT into a `ws://`
+URL. `pipegate connect` collapses this into one command driven by a config file.
+
+Create `~/.config/pipegate/config.toml`:
+
+```toml
+[profiles.default]
+target     = "http://localhost:3000"
+server     = "https://yourserver.example.com"
+cid        = "my-app"
+secret_env = "PIPEGATE_JWT_SECRET"   # read secret from env, not the file
+```
+
+Then:
+
+```bash
+export PIPEGATE_JWT_SECRET="change-me-to-something-secret"
+pipegate connect              # uses the "default" profile
+pipegate connect deerflow     # uses a named profile
+```
+
+`connect` signs a never-expiring JWT locally with your secret and starts the
+tunnel — no copy-paste, no 21-day renewal. See [Profiles](#profiles) for the
+full config schema.
 
 ## CLI
 
 ```
 pipegate token [-c ID]              Generate a JWT bearer token
 pipegate client TARGET_URL WS_URL   Start the tunnel client
+pipegate connect [PROFILE]          Start the tunnel via a config profile (recommended)
 pipegate server [--host H] [-p N]   Start the server (default: 0.0.0.0:8000)
 ```
 
@@ -105,14 +128,64 @@ Environment variables via pydantic-settings:
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `PIPEGATE_JWT_SECRET` | Yes | -- | Shared secret for JWT signing/verification |
-| `PIPEGATE_JWT_ALGORITHMS` | Yes | -- | Algorithm list, e.g. `'["HS256"]'` |
+| `PIPEGATE_JWT_ALGORITHMS` | No | `["HS256"]` | Algorithm list, e.g. `'["HS256"]'` |
 | `PIPEGATE_JWT_ISSUER` | No | `pipegate` | JWT `iss` claim — must match on both sides |
 | `PIPEGATE_JWT_AUDIENCE` | No | `pipegate` | JWT `aud` claim — must match on both sides |
-| `PIPEGATE_JWT_TTL_DAYS` | No | `21` | Token lifetime in days |
+| `PIPEGATE_JWT_TTL_DAYS` | No | `None` (never expires) | Token lifetime in days; unset = never expires |
 | `PIPEGATE_CONNECTION_ID` | No | random UUID | Pin a specific connection ID when generating tokens |
 | `PIPEGATE_MAX_BODY_BYTES` | No | 10 MB | Reject requests larger than this (413) |
 | `PIPEGATE_MAX_QUEUE_DEPTH` | No | 100 | Per-tunnel queue size before returning 503 |
 | `PIPEGATE_BASE_DOMAIN` | No | -- | Enable subdomain routing (see below) |
+
+## Profiles
+
+`pipegate connect` reads profiles from TOML config files. Two locations are
+searched and merged (project-level keys override user-level for the same
+profile name):
+
+1. `~/.config/pipegate/config.toml` (or `$XDG_CONFIG_HOME/pipegate/config.toml`)
+2. `./.pipegate.toml` in the current working directory
+
+### Schema
+
+```toml
+[profiles.<name>]
+target     = "http://localhost:3000"   # required: local server to forward to
+server     = "https://tunnel.example.com"  # required: server base URL
+cid        = "my-app"                  # optional: pin connection_id (random if omitted)
+secret     = "inline-secret"           # one of secret / secret_env is required
+secret_env = "PIPEGATE_JWT_SECRET"     #   takes precedence over 'secret' when both set
+ttl_days   = 30                        # optional: token lifetime, must be > 0 (omit = never expires)
+```
+
+`server`'s scheme decides the WebSocket scheme: `https://` → `wss://`,
+`http://` → `ws://`. The JWT is appended as `?token=…` automatically.
+
+### Example
+
+```toml
+# ~/.config/pipegate/config.toml
+[profiles.default]
+target     = "http://localhost:3000"
+server     = "https://tunnel.example.com"
+cid        = "my-app"
+secret_env = "PIPEGATE_JWT_SECRET"
+
+[profiles.app2]
+target   = "http://localhost:3001"
+server   = "https://app2.example.com"
+cid      = "app2"
+secret_env = "PIPEGATE_JWT_SECRET"
+```
+
+```bash
+pipegate connect              # → "default" profile
+pipegate connect app2         # → "app2" profile
+pipegate connect --cid temp   # override cid for this run only
+```
+
+**Security:** prefer `secret_env` over inline `secret` — it keeps the secret
+out of the config file. Never commit a config containing an inline `secret`.
 
 ## Subdomain Routing
 

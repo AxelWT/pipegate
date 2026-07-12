@@ -15,13 +15,23 @@ class TokenResult(NamedTuple):
 
 
 def generate_token(settings: Settings, connection_id: str | None = None) -> TokenResult:
-    """Create a connection ID and signed JWT."""
+    """Create a connection ID and signed JWT.
+
+    When ``settings.jwt_ttl_days`` is ``None`` (the default), the token never
+    expires — the ``exp`` claim is omitted entirely. pyjwt only enforces
+    expiry when ``exp`` is present, so such tokens remain valid indefinitely.
+    """
     cid = connection_id or settings.connection_id or uuid.uuid4().hex
     now = datetime.now(UTC)
     ts = int(now.timestamp())
+    exp = (
+        int((now + timedelta(days=settings.jwt_ttl_days)).timestamp())
+        if settings.jwt_ttl_days is not None
+        else None
+    )
     payload = JWTPayload(
         sub=cid,
-        exp=int((now + timedelta(days=settings.jwt_ttl_days)).timestamp()),
+        exp=exp,
         nbf=ts,
         iat=ts,
         iss=settings.jwt_issuer,
@@ -29,7 +39,7 @@ def generate_token(settings: Settings, connection_id: str | None = None) -> Toke
         jti=uuid.uuid4().hex,
     )
     token = jwt.encode(
-        payload.model_dump(mode="json"),
+        payload.model_dump(mode="json", exclude_none=True),
         key=settings.jwt_secret.get_secret_value(),
         algorithm=settings.jwt_algorithms[0],
     )

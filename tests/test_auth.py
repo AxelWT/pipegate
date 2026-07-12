@@ -106,9 +106,28 @@ class TestGenerateToken:
         s = Settings()
         result = generate_token(s)
         payload = verify_token(result.bearer, s)
+        assert payload.exp is not None
         assert abs(payload.exp - (int(time.time()) + 7 * 24 * 3600)) < 60
 
-    def test_default_ttl_is_21_days(self, settings: Settings) -> None:
+    def test_default_ttl_never_expires(self, settings: Settings) -> None:
         result = generate_token(settings)
         payload = verify_token(result.bearer, settings)
-        assert abs(payload.exp - (int(time.time()) + 21 * 24 * 3600)) < 60
+        assert payload.exp is None
+
+    def test_never_expiring_token_has_no_exp_claim(self, settings: Settings) -> None:
+        result = generate_token(settings)
+        decoded = jwt.decode(
+            result.bearer,
+            settings.jwt_secret.get_secret_value(),
+            algorithms=settings.jwt_algorithms,
+            audience=settings.jwt_audience,
+            issuer=settings.jwt_issuer,
+            options={"verify_exp": False},
+        )
+        assert "exp" not in decoded
+
+    def test_never_expiring_token_still_verifies(self, settings: Settings) -> None:
+        result = generate_token(settings)
+        payload = verify_token(result.bearer, settings)
+        assert payload.sub == result.connection_id
+        assert payload.exp is None

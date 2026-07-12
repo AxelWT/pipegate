@@ -2,6 +2,11 @@
 #
 # start-tunnel.sh — Start a pipegate tunnel client connecting to a remote server.
 #
+# [DEPRECATED] Prefer `pipegate connect <profile>` instead — it signs the JWT
+# and starts the client in one command, driven by a config file. See the
+# "Profiles" section in README.md. This script is retained for backwards
+# compatibility.
+#
 # Prerequisites:
 #   - Run `uv sync` in repo root first (creates .venv with pipegate CLI)
 #   - Local service must be running on the target port
@@ -10,6 +15,8 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
+[DEPRECATED] Prefer `pipegate connect <profile>` (see README.md, "Profiles").
+
 Usage: scripts/start-tunnel.sh --secret S --cid C --port P --domain D [--no-wss]
 
 Required:
