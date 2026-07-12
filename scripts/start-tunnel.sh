@@ -1,102 +1,133 @@
 #!/usr/bin/env bash
 #
-# start-tunnel.sh — Start a pipegate tunnel client connecting to a remote server.
+# start-tunnel.sh — Start a pipegate tunnel client via a config profile.
 #
-# [DEPRECATED] Prefer `pipegate connect <profile>` instead — it signs the JWT
-# and starts the client in one command, driven by a config file. See the
-# "Profiles" section in README.md. This script is retained for backwards
-# compatibility.
+# Thin wrapper around `pipegate connect` that adds two conveniences:
+#   1. Auto-loads ./.env so PIPEGATE_JWT_SECRET is set without manual export.
+#   2. Pre-flight checks the local service port is listening (uses the
+#      real pipegate config loader to resolve the profile's target port),
+#      failing fast with a clear message instead of a 504 later.
+#
+# Usage:
+#   scripts/start-tunnel.sh                          # default profile
+#   scripts/start-tunnel.sh app1                     # named profile
+#   scripts/start-tunnel.sh app1 --target http://localhost:4000   # pass-through
+#   scripts/start-tunnel.sh -h|--help
 #
 # Prerequisites:
-#   - Run `uv sync` in repo root first (creates .venv with pipegate CLI)
-#   - Local service must be running on the target port
+#   - Run `uv sync` in the repo root first (creates .venv with pipegate CLI)
+#   - A profile defined in ~/.config/pipegate/config.toml or ./.pipegate.toml
+#     (copy from .pipegate.toml.example)
+#   - ./.env with PIPEGATE_JWT_SECRET (copy from .env.example), OR the
+#     secret exported in your shell
+#   - Local service running on the profile's target port
 #
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
-[DEPRECATED] Prefer `pipegate connect <profile>` (see README.md, "Profiles").
+Usage: scripts/start-tunnel.sh [PROFILE] [CONNECT_FLAGS...]
 
-Usage: scripts/start-tunnel.sh --secret S --cid C --port P --domain D [--no-wss]
+Start a pipegate tunnel client via a config profile.
 
-Required:
-  --secret S    JWT secret (must match server's PIPEGATE_JWT_SECRET)
-  --cid C       connection_id, e.g. deerflow
-  --port P      local service port, e.g. 2026
-  --domain D    server domain, e.g. deerflow.axello.cn
+Arguments:
+  PROFILE         Profile name (default: "default"). Must be defined in
+                  ~/.config/pipegate/config.toml or ./.pipegate.toml.
+  CONNECT_FLAGS   Extra flags passed through to `pipegate connect`
+                  (e.g. --target, --server, --cid, --secret).
 
-Optional:
-  --no-wss      Use ws:// instead of wss:// (for HTTP-only setups)
-  -h, --help    Show this help
+Options:
+  -h, --help      Show this help
 
-Example:
-  scripts/start-tunnel.sh \
-    --secret my-secret \
-    --cid deerflow \
-    --port 2026 \
-    --domain deerflow.axello.cn
+Examples:
+  scripts/start-tunnel.sh
+  scripts/start-tunnel.sh app1
+  scripts/start-tunnel.sh app1 --target http://localhost:4000
 
-Security note:
-  --secret appears in the process list and shell history. In shared
-  environments prefer running in a private shell or wiping history after.
+Prerequisites:
+  - `uv sync` run in repo root (creates .venv with the pipegate CLI)
+  - A profile defined in ~/.config/pipegate/config.toml or ./.pipegate.toml
+  - ./.env with PIPEGATE_JWT_SECRET (or exported in your shell)
+  - Local service running on the profile's target port
 EOF
 }
 
 # ---------------------------------------------------------------------------
-# Parse args
+# Parse first argument: profile name, -h/--help, or default
 # ---------------------------------------------------------------------------
 
-SECRET=""
-CID=""
-PORT=""
-DOMAIN=""
-NO_WSS=0
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --secret)  SECRET="$2";  shift 2 ;;
-        --cid)     CID="$2";     shift 2 ;;
-        --port)    PORT="$2";    shift 2 ;;
-        --domain)  DOMAIN="$2";  shift 2 ;;
-        --no-wss)  NO_WSS=1;     shift ;;
-        -h|--help) usage;        exit 0 ;;
-        *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
-    esac
-done
-
-# ---------------------------------------------------------------------------
-# Validate required args
-# ---------------------------------------------------------------------------
-
-missing=()
-[[ -z "$SECRET"  ]] && missing+=(--secret)
-[[ -z "$CID"     ]] && missing+=(--cid)
-[[ -z "$PORT"    ]] && missing+=(--port)
-[[ -z "$DOMAIN"  ]] && missing+=(--domain)
-if [[ ${#missing[@]} -gt 0 ]]; then
-    echo "Error: missing required argument(s): ${missing[*]}" >&2
-    echo >&2
-    usage >&2
-    exit 2
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage
+    exit 0
 fi
 
-# Validate port is numeric
-if ! [[ "$PORT" =~ ^[0-9]+$ ]] || [[ "$PORT" -lt 1 || "$PORT" -gt 65535 ]]; then
-    echo "Error: --port must be a number in 1..65535 (got: $PORT)" >&2
-    exit 2
+PROFILE="${1:-default}"
+# If a profile name was given, shift it off so "$@" holds connect flags.
+# A leading "--" means no profile was given, only flags — keep $1 intact.
+if [[ "$#" -gt 0 && "$1" != --* ]]; then
+    shift
 fi
 
 # ---------------------------------------------------------------------------
-# Locate repo root and pipegate CLI
+# Locate repo root and pipegate CLI / python
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 PIPEGATE="$REPO_ROOT/.venv/bin/pipegate"
+PYTHON="$REPO_ROOT/.venv/bin/python"
 
 if [[ ! -x "$PIPEGATE" ]]; then
     echo "Error: pipegate CLI not found at $PIPEGATE" >&2
     echo "Run 'uv sync' in the repo root first." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Load ./.env if present (auto-inject PIPEGATE_JWT_SECRET)
+# ---------------------------------------------------------------------------
+
+if [[ -f "$REPO_ROOT/.env" ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source "$REPO_ROOT/.env"
+    set +a
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve the profile's target port via the real config loader.
+# This also validates the profile exists, target is set, and secret_env
+# points to a populated variable — failing fast with a clear error.
+# ---------------------------------------------------------------------------
+
+set +e
+PORT="$("$PYTHON" - "$PROFILE" <<'PYEOF'
+import sys
+from urllib.parse import urlparse
+from pipegate.config import load_profile
+
+try:
+    p = load_profile(sys.argv[1])
+except Exception as e:
+    print(f"config: {e}", file=sys.stderr)
+    sys.exit(1)
+
+parsed = urlparse(p.target)
+port = parsed.port or (443 if parsed.scheme == "https" else 80)
+print(port)
+PYEOF
+)"
+RC=$?
+set -e
+
+if [[ $RC -ne 0 ]]; then
+    echo "Error: failed to resolve profile '$PROFILE' (see message above)." >&2
+    exit 1
+fi
+
+if ! [[ "$PORT" =~ ^[0-9]+$ ]]; then
+    echo "Error: resolved port is not numeric: '$PORT'" >&2
+    echo "Profile '$PROFILE' target may be malformed." >&2
     exit 1
 fi
 
@@ -106,41 +137,18 @@ fi
 
 if ! (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null; then
     echo "Error: no service listening on 127.0.0.1:$PORT" >&2
-    echo "Start your local service first." >&2
+    echo "Profile '$PROFILE' targets that port. Start your local service first." >&2
     exit 1
 fi
 exec 3>&- 3<&- 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Generate token
+# Start the tunnel — exec replaces this process so Ctrl-C goes straight
+# to `pipegate connect`, which handles its own reconnect loop.
 # ---------------------------------------------------------------------------
 
-export PIPEGATE_JWT_SECRET="$SECRET"
-export PIPEGATE_JWT_ALGORITHMS='["HS256"]'
-
-echo "Generating token for connection_id=$CID ..."
-TOKEN_OUTPUT="$("$PIPEGATE" token -c "$CID")"
-JWT="$(echo "$TOKEN_OUTPUT" | grep '^JWT Bearer:' | sed 's/^JWT Bearer:[[:space:]]*//')"
-
-if [[ -z "$JWT" ]]; then
-    echo "Error: failed to parse JWT from token output." >&2
-    echo "--- token output ---" >&2
-    echo "$TOKEN_OUTPUT" >&2
-    exit 1
-fi
-
-echo "Token generated (connection_id=$CID)"
-
-# ---------------------------------------------------------------------------
-# Build WS URL and start client
-# ---------------------------------------------------------------------------
-
-SCHEME="wss"
-[[ "$NO_WSS" == "1" ]] && SCHEME="ws"
-WS_URL="${SCHEME}://${DOMAIN}/?token=${JWT}"
-
-echo "Connecting to ${SCHEME}://${DOMAIN}/ ..."
+echo "Profile:      $PROFILE"
+echo "Target port:  $PORT (local service OK)"
+echo "Starting pipegate connect ..."
 echo "---"
-# exec replaces this process with pipegate client so Ctrl-C is delivered
-# directly to the client (pipegate client handles its own reconnect loop).
-exec "$PIPEGATE" client "http://localhost:${PORT}" "$WS_URL"
+exec "$PIPEGATE" connect "$PROFILE" "$@"

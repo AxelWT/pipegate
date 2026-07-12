@@ -1,0 +1,74 @@
+# PipeGate tunnel clients — run two tunnels (app1, app2) to a remote server.
+#
+# Both services reuse the same image built from the repo Dockerfile (which
+# ships the `pipegate` CLI). Each service runs one `pipegate connect` process
+# bound to its own profile/cid, so the two tunnels are fully independent:
+# separate WebSockets, separate logs, separate restarts.
+#
+# Prerequisites:
+#   1. Build the image once:
+#        docker build -t pipegate:local .
+#      (or set IMAGE to a remote tag, e.g. in .env: IMAGE=registry/ns/pipegate:latest)
+#   2. Copy .env.example to .env and fill in PIPEGATE_JWT_SECRET.
+#   3. Copy .pipegate.toml.example to ./.pipegate.toml and fill in server
+#      URL + ports. This file is mounted into both containers (project-level
+#      config, read by the client from CWD = /app).
+#   4. Replace <PORT1> / <PORT2> below with the host ports your two services
+#      publish (the same ports you'd hit on localhost).
+#   5. Server side must run in subdomain mode (PIPEGATE_BASE_DOMAIN set) with
+#      wildcard DNS + TLS so app1.<base> / app2.<base> resolve.
+#
+# Usage:
+#   docker compose -f docker-compose.client.yml up -d
+#   docker compose -f docker-compose.client.yml logs -f
+#   docker compose -f docker-compose.client.yml down
+
+services:
+  pipegate-client-a:
+    image: ${IMAGE:-pipegate:local}
+    container_name: pipegate-client-a
+    restart: unless-stopped
+    env_file:
+      - .env
+    extra_hosts:
+      # macOS resolves host.docker.internal natively; this line makes the same
+      # name work on Linux hosts too, so the compose file is portable.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Project-level profile config, mounted read-only at the container's
+      # CWD (/app, set by Dockerfile). The client reads it via
+      # `Path.cwd() / ".pipegate.toml"`. The profile's own `target`
+      # (localhost:<port>) is overridden below via --target so the request
+      # reaches the host service through host.docker.internal.
+      - "./.pipegate.toml:/app/.pipegate.toml:ro"
+    command:
+      - pipegate
+      - connect
+      - app1
+      - --target
+      - http://host.docker.internal:<PORT1>
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  pipegate-client-b:
+    image: ${IMAGE:-pipegate:local}
+    container_name: pipegate-client-b
+    restart: unless-stopped
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - "./.pipegate.toml:/app/.pipegate.toml:ro"
+    command:
+      - pipegate
+      - connect
+      - app2
+      - --target
+      - http://host.docker.internal:<PORT2>
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"

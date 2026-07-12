@@ -1,0 +1,29 @@
+# ── PipeGate tunnel profiles ─────────────────────────────────────────────
+# Copy to one of these locations (project-level overrides user-level keys
+# for the same profile name):
+#
+#   ~/.config/pipegate/config.toml   (user-level — read by host & container)
+#   ./.pipegate.toml                 (project-level — overrides user-level)
+#
+# Then fill in your server URL and local service ports.
+
+# Profile "app1" — tunnels to the service on localhost:3000.
+# Inside the Docker container, --target overrides this to
+# http://host.docker.internal:3000 (see docker-compose.client.yml).
+[profiles.app1]
+target     = "http://localhost:3000"         # local service to forward to
+server     = "https://tunnel.example.com"    # server base URL (https→wss, http→ws)
+cid        = "app1"                          # connection_id = subdomain label (server lowercases it)
+secret_env = "PIPEGATE_JWT_SECRET"           # read secret from env (preferred)
+# secret     = "inline-secret"               # alternative: inline (insecure!)
+# ttl_days   = 30                            # optional: token lifetime (omit = never)
+
+# Profile "app2" — tunnels to the service on localhost:8080.
+[profiles.app2]
+target     = "http://localhost:8080"
+server     = "https://tunnel.example.com"
+cid        = "app2"                          # connection_id = subdomain label (server lowercases it)
+secret_env = "PIPEGATE_JWT_SECRET"
+
+# To add a third tunnel, copy a block above, use a new cid (e.g. "app3"),
+# and add a matching service in docker-compose.client.yml.
