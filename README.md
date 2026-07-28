@@ -48,9 +48,11 @@ pipegate server [--host H] [-p N]   Start the server (default: 0.0.0.0:8000)
 
 A caller hits the server at `/{connection_id}/{path}`. The server wraps the request into a JSON message (method, path, headers, base64-encoded body) tagged with a `correlation_id` (UUID4), and pushes it into an in-memory `asyncio.Queue` for that connection. A background task drains the queue over the WebSocket to the tunnel client.
 
-The client receives the message, makes a real HTTP request to your local service, and sends back a response message with the same `correlation_id`. The server matches it to the waiting `asyncio.Future` and returns the response to the original caller.
+The client receives the message, makes a real HTTP request to your local service, and streams the response back as a sequence of frames: **`ResponseHeaders`** (status + headers), then zero or more **`ResponseChunk`** frames (each upstream body chunk, base64-encoded), then a final **`ResponseEnd`** frame. The server matches frames to the waiting per-request `asyncio.Queue` and forwards them to the original caller as an HTTP streaming response (`Transfer-Encoding: chunked`).
 
-Multiple requests fly concurrently over one WebSocket -- the correlation ID is what ties each request to its response. Bodies are base64-encoded so binary payloads survive the JSON text frames.
+Multiple requests fly concurrently over one WebSocket -- the correlation ID is what ties each request's frames together. Bodies are base64-encoded so binary payloads survive the JSON text frames. Because the body is streamed chunk-by-chunk rather than buffered, SSE endpoints (e.g. LangGraph `/runs/stream`) work correctly: the caller receives events as they arrive instead of timing out waiting for the whole response.
+
+**Cancel propagation.** If the caller disconnects mid-stream (closes the browser tab, aborts the request), the server detects the dropped connection and sends a **`CancelRequest`** frame to the client, which closes the upstream httpx stream (`response.aclose()`). This lets the local service (LangGraph, deerflow, etc.) observe a client-side disconnect and abort any active run instead of leaving it dangling -- the root cause of `HTTP 409: Thread ... already has an active run`.
 
 Tunnel connections are JWT-authenticated: the token carries the connection ID as its `sub` claim, signed with the shared `PIPEGATE_JWT_SECRET`. External HTTP callers don't need the JWT — only the WebSocket upgrade does; the server rejects invalid tokens with close code 1008.
 
@@ -60,11 +62,14 @@ Tunnel connections are JWT-authenticated: the token carries the connection ID as
 |---|---|
 | Client is slow / not connected | Queue fills up, caller gets **503** |
 | Request body too large | Rejected immediately with **413** |
-| Client disconnects mid-request | Pending future fails with **502** |
-| No response within 5 minutes | Caller gets **504** |
-| Server shuts down | All pending futures resolve with **504** (no hanging requests) |
+| Client disconnects mid-request | Pending response stream resolves with **502** (`ResponseEnd` with error) |
+| Caller disconnects mid-stream | `CancelRequest` sent to client; upstream request closed |
+| Tunnel WebSocket drops mid-stream | Active response stream terminates with **502** |
+| No response headers within `PIPEGATE_STREAM_HEADER_TIMEOUT` (300s) | Caller gets **504** |
+| Stream idle for `PIPEGATE_STREAM_IDLE_TIMEOUT` (300s) | Stream terminated; `CancelRequest` sent to client |
+| Server shuts down | All pending streams resolve with **504** (no hanging requests) |
 | WebSocket drops | Client reconnects automatically (exponential backoff, 1s to 60s) |
-| Client can't reach local service | Returns **504** to server, which forwards it to caller |
+| Client can't reach local service | Emits `ResponseEnd(error=...)` before any headers; caller gets **502** |
 
 ## Authentication
 
@@ -84,6 +89,8 @@ Environment variables via pydantic-settings:
 | `PIPEGATE_CONNECTION_ID` | No | random UUID | Pin a connection ID when generating tokens (flag `--connection-id` takes precedence) |
 | `PIPEGATE_MAX_BODY_BYTES` | No | 10 MB | Reject requests larger than this (413) |
 | `PIPEGATE_MAX_QUEUE_DEPTH` | No | 100 | Per-tunnel queue size before returning 503 |
+| `PIPEGATE_STREAM_HEADER_TIMEOUT` | No | 300 | Seconds to wait for the first response frame before returning 504. `0` disables (wait forever). Raise or disable for Agent/SSE upstreams that think for many minutes before emitting any bytes |
+| `PIPEGATE_STREAM_IDLE_TIMEOUT` | No | 300 | Seconds of idle (no chunks) allowed between response frames before the stream is terminated and a `CancelRequest` is sent. `0` disables. Raise or disable for SSE/Agent streams with long gaps between events |
 | `PIPEGATE_BASE_DOMAIN` | No | -- | Enable subdomain routing (see below) |
 
 ## Profiles
@@ -194,9 +201,66 @@ third tunnel, copy a service block and add a matching `[profiles.app3]`.
 | `*` | `/{path}` | None | Tunnel passthrough (subdomain mode, Host: `{cid}.{base_domain}`) |
 | `WS` | `/?token=<jwt>` | JWT | Tunnel client connection |
 
+## Long-Task & SSE Streaming
+
+PipeGate forwards upstream responses chunk-by-chunk, so SSE/Agent endpoints
+(`/runs/stream`, LLM tool-call events, etc.) work correctly. Two knobs keep
+long-task streams from being cut off prematurely:
+
+**Client-side (httpx read timeout).** The tunnel client constructs
+`httpx.AsyncClient` with `read=None` — i.e. no per-chunk read timeout. httpx's
+default `Timeout(5.0)` would otherwise raise `ReadTimeout` on any SSE event
+gap longer than 5s (model reasoning, tool calls, sub-agent delegation) and
+abruptly terminate the stream with `ResponseEnd(error="read timed out")`.
+Connect/write/pool timeouts stay tight (10s) so dead upstreams are still
+detected.
+
+**Server-side idle/header timeouts.** `PIPEGATE_STREAM_HEADER_TIMEOUT`
+(default 300s) bounds the wait for the first response frame; `PIPEGATE_STREAM_IDLE_TIMEOUT`
+(default 300s) bounds idle gaps between chunks. Both support `0 = disabled`.
+For Agent upstreams that think for many minutes before the first byte, raise
+or disable the header timeout; for SSE streams with long event gaps, raise or
+disable the idle timeout. When either fires, the stream is terminated and a
+`CancelRequest` is sent so the tunnel client aborts the upstream request.
+
+```bash
+# Example: Agent service that may go 30min between events
+export PIPEGATE_STREAM_HEADER_TIMEOUT=1800
+export PIPEGATE_STREAM_IDLE_TIMEOUT=0
+```
+
+## Reverse Proxy Deployment
+
+When pipegate server sits behind a reverse proxy (nginx, Cloudflare, ALB,
+Caddy, etc.), the proxy's own WebSocket idle timeout is often shorter than
+the client's `ping_interval` (20s) and silently drops the tunnel — surfacing
+as a stream cut off mid-task. Align the proxy's idle timeout to be
+comfortably longer than 20s.
+
+**nginx** — in the location block proxying to pipegate:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_read_timeout 60s;   # must exceed client ping_interval (20s)
+    proxy_send_timeout 60s;
+}
+```
+
+**Cloudflare / ALB** — set the WebSocket idle timeout to ≥60s
+(Cloudflare: "WebSocket" → Idle Timeout; ALB: `idle_timeout.timeout_seconds`).
+
+The tunnel client also sends explicit WebSocket pings every 20s and lifts the
+default 1MiB frame cap (`max_size=None`) so large base64-encoded upstream
+bodies (Agent responses, file outputs) aren't rejected.
+
 ## Design Notes
 
-**No external state.** The entire coordination layer is `dict[str, asyncio.Queue]` for pending requests and `dict[UUID, asyncio.Future]` for pending responses. This makes PipeGate trivially deployable (single process, no Redis/database), but means it doesn't survive server restarts and doesn't scale horizontally. That's fine for the intended use case.
+**No external state.** The entire coordination layer is `dict[str, asyncio.Queue]` for outbound messages (requests and cancels) and `dict[UUID, asyncio.Queue]` for inbound response streams. This makes PipeGate trivially deployable (single process, no Redis/database), but means it doesn't survive server restarts and doesn't scale horizontally. That's fine for the intended use case.
 
 **Closure-based app factory.** `create_app()` captures all mutable state in a closure rather than using global variables. Each call gets completely fresh state, which makes tests fully isolated without any cleanup fixtures.
 

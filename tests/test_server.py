@@ -11,7 +11,13 @@ import orjson
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient, Response
 
-from pipegate.schemas import BufferGateRequest, BufferGateResponse, Settings
+from pipegate.schemas import (
+    BufferGateRequest,
+    ResponseChunk,
+    ResponseEnd,
+    ResponseHeaders,
+    Settings,
+)
 from pipegate.server import create_app
 
 from .conftest import make_token
@@ -25,6 +31,53 @@ def _make_app() -> FastAPI:
     app = create_app()
     app.extra["settings"] = Settings()
     return app
+
+
+async def _send_streaming_response(
+    inbox: asyncio.Queue[dict[str, object]],
+    fwd: dict[str, object],
+    *,
+    response_body: bytes = b"tunnel-response",
+    response_status: int = 200,
+    response_headers: str | None = None,
+    error: str | None = None,
+    skip_headers: bool = False,
+) -> None:
+    """Push the streaming-response sequence (ResponseHeaders -> optional
+    ResponseChunk -> ResponseEnd) for the given forwarded request. If
+    ``skip_headers`` is set, only ResponseEnd is sent (simulating a client
+    error before headers arrived). If ``error`` is set, ResponseEnd carries
+    it (simulating mid-stream abnormal termination)."""
+    cid = fwd["correlation_id"]
+    if not skip_headers:
+        await inbox.put(
+            {
+                "type": "websocket.receive",
+                "text": ResponseHeaders(
+                    correlation_id=cid,
+                    status_code=response_status,
+                    headers=response_headers
+                    if response_headers is not None
+                    else orjson.dumps([["x-tunnel", "ok"]]).decode(),
+                ).model_dump_json(),
+            }
+        )
+        if response_body:
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseChunk(
+                        correlation_id=cid,
+                        body=base64.b64encode(response_body).decode(),
+                    ).model_dump_json(),
+                }
+            )
+    await inbox.put(
+        {
+            "type": "websocket.receive",
+            "text": ResponseEnd(correlation_id=cid, error=error).model_dump_json(),
+        }
+    )
 
 
 async def _ws_roundtrip(
@@ -80,16 +133,12 @@ async def _ws_roundtrip(
             fwd = json.loads(cast(str, msg["text"]))
             forwarded_request.update(fwd)
 
-            response = BufferGateResponse(
-                correlation_id=fwd["correlation_id"],
-                headers=response_headers
-                if response_headers is not None
-                else orjson.dumps([["x-tunnel", "ok"]]).decode(),
-                body=base64.b64encode(response_body).decode(),
-                status_code=response_status,
-            )
-            await inbox.put(
-                {"type": "websocket.receive", "text": response.model_dump_json()}
+            await _send_streaming_response(
+                inbox,
+                fwd,
+                response_body=response_body,
+                response_status=response_status,
+                response_headers=response_headers,
             )
 
             await asyncio.sleep(0.05)
@@ -203,12 +252,15 @@ class TestTunnelRoundTrip:
         assert base64.b64decode(fwd["body"]) == binary
 
     async def test_head_response_has_no_body(self, connection_id: str) -> None:
+        # The real client uses httpx.stream() which yields no chunks for HEAD
+        # (httpx knows HEAD has no body), so the tunnel emits headers + end
+        # only. Simulate that: response_body=b"" means no ResponseChunk.
         resp, _ = await _ws_roundtrip(
             _make_app(),
             connection_id,
             make_token(connection_id),
             method="HEAD",
-            response_body=b"hello",
+            response_body=b"",
         )
         assert resp.status_code == 200
         assert resp.content == b""
@@ -786,16 +838,12 @@ async def _ws_roundtrip_subdomain(
             fwd = json.loads(cast(str, msg["text"]))
             forwarded_request.update(fwd)
 
-            response = BufferGateResponse(
-                correlation_id=fwd["correlation_id"],
-                headers=response_headers
-                if response_headers is not None
-                else orjson.dumps([["x-tunnel", "ok"]]).decode(),
-                body=base64.b64encode(response_body).decode(),
-                status_code=response_status,
-            )
-            await inbox.put(
-                {"type": "websocket.receive", "text": response.model_dump_json()}
+            await _send_streaming_response(
+                inbox,
+                fwd,
+                response_body=response_body,
+                response_status=response_status,
+                response_headers=response_headers,
             )
 
             await asyncio.sleep(0.05)
@@ -876,15 +924,7 @@ class TestSubdomainRouting:
                 assert msg["type"] == "websocket.accept"
                 fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
                 fwd = json.loads(cast(str, fwd_msg["text"]))
-                response = BufferGateResponse(
-                    correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
-                    body=base64.b64encode(b"ok").decode(),
-                    status_code=200,
-                )
-                await inbox.put(
-                    {"type": "websocket.receive", "text": response.model_dump_json()}
-                )
+                await _send_streaming_response(inbox, fwd, response_body=b"ok")
                 await asyncio.sleep(0.05)
                 await inbox.put({"type": "websocket.disconnect"})
                 with contextlib.suppress(Exception):
@@ -939,15 +979,7 @@ class TestSubdomainRouting:
                 assert msg["type"] == "websocket.accept"
                 fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
                 fwd = json.loads(cast(str, fwd_msg["text"]))
-                response = BufferGateResponse(
-                    correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
-                    body=base64.b64encode(b"ok").decode(),
-                    status_code=200,
-                )
-                await inbox.put(
-                    {"type": "websocket.receive", "text": response.model_dump_json()}
-                )
+                await _send_streaming_response(inbox, fwd, response_body=b"ok")
                 await asyncio.sleep(0.05)
                 await inbox.put({"type": "websocket.disconnect"})
                 with contextlib.suppress(Exception):
@@ -1007,15 +1039,7 @@ class TestSubdomainRouting:
                 assert msg["type"] == "websocket.accept"
                 fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
                 fwd = json.loads(cast(str, fwd_msg["text"]))
-                response = BufferGateResponse(
-                    correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
-                    body=base64.b64encode(b"ok").decode(),
-                    status_code=200,
-                )
-                await inbox.put(
-                    {"type": "websocket.receive", "text": response.model_dump_json()}
-                )
+                await _send_streaming_response(inbox, fwd, response_body=b"ok")
                 await asyncio.sleep(0.05)
                 await inbox.put({"type": "websocket.disconnect"})
                 with contextlib.suppress(Exception):
@@ -1061,15 +1085,7 @@ class TestSubdomainRouting:
                 assert msg["type"] == "websocket.accept"
                 fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
                 fwd = json.loads(cast(str, fwd_msg["text"]))
-                response = BufferGateResponse(
-                    correlation_id=fwd["correlation_id"],
-                    headers=orjson.dumps([["x-tunnel", "ok"]]).decode(),
-                    body=base64.b64encode(b"ok").decode(),
-                    status_code=200,
-                )
-                await inbox.put(
-                    {"type": "websocket.receive", "text": response.model_dump_json()}
-                )
+                await _send_streaming_response(inbox, fwd, response_body=b"ok")
                 await asyncio.sleep(0.05)
                 await inbox.put({"type": "websocket.disconnect"})
                 with contextlib.suppress(Exception):
@@ -1107,3 +1123,557 @@ class TestPathModeBackwardCompat:
         )
         assert resp.status_code == 200
         assert fwd["url_path"] == "static/main.js"
+
+
+# ---------------------------------------------------------------------------
+# Streaming response protocol
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingProtocol:
+    """The tunnel forwards responses as ResponseHeaders -> N ResponseChunk ->
+    ResponseEnd. This unifies SSE/streaming and buffered responses under one
+    protocol and is what enables pipegate to proxy LangGraph /runs/stream
+    endpoints without the caller timing out before any event arrives."""
+
+    async def test_multiple_chunks_concatenated(self, connection_id: str) -> None:
+        """SSE-style: many small chunks must arrive at the HTTP caller in
+        order, concatenated into the full body."""
+        app = _make_app()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        sse_events = [
+            b'data: {"chunk": 1}\n\n',
+            b'data: {"chunk": 2}\n\n',
+            b'data: {"chunk": 3}\n\n',
+            b"data: [DONE]\n\n",
+        ]
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(outbox.get(), timeout=5)  # accept
+
+            # Start HTTP first — the WS handler forwards it via outbox.
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/stream"))
+            fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            fwd = json.loads(cast(str, fwd_msg["text"]))
+            cid = fwd["correlation_id"]
+
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseHeaders(
+                        correlation_id=cid,
+                        status_code=200,
+                        headers=orjson.dumps(
+                            [["content-type", "text/event-stream"]]
+                        ).decode(),
+                    ).model_dump_json(),
+                }
+            )
+            for ev in sse_events:
+                await inbox.put(
+                    {
+                        "type": "websocket.receive",
+                        "text": ResponseChunk(
+                            correlation_id=cid,
+                            body=base64.b64encode(ev).decode(),
+                        ).model_dump_json(),
+                    }
+                )
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseEnd(correlation_id=cid).model_dump_json(),
+                }
+            )
+
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+            await asyncio.sleep(0.05)
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "text/event-stream"
+        assert resp.content == b"".join(sse_events)
+
+    async def test_error_before_headers_returns_502(self, connection_id: str) -> None:
+        """If the tunnel client sends only ResponseEnd(error=...) with no
+        preceding ResponseHeaders (e.g. upstream ConnectError), the caller
+        must receive 502 — not a hang, not a 200 with empty body."""
+        app = _make_app()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(outbox.get(), timeout=5)  # accept
+
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/x"))
+            fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            fwd = json.loads(cast(str, fwd_msg["text"]))
+            cid = fwd["correlation_id"]
+
+            # No ResponseHeaders — just an error end.
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseEnd(
+                        correlation_id=cid, error="ConnectError: refused"
+                    ).model_dump_json(),
+                }
+            )
+
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+            await asyncio.sleep(0.05)
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        assert resp.status_code == 502
+        assert "ConnectError" in resp.json()["detail"]
+
+    async def test_caller_disconnect_propagates_cancel(
+        self, connection_id: str
+    ) -> None:
+        """When the HTTP caller disconnects mid-stream, the server must push
+        a CancelRequest onto the tunnel's outbound queue so the client aborts
+        the upstream request (preventing dangling LangGraph runs that would
+        otherwise 409 on the next request).
+
+        We call the ASGI app directly with a custom ``receive`` callable that
+        returns ``http.disconnect`` on demand — httpx's ASGITransport doesn't
+        propagate caller cancellation to the server, so this is the only way
+        to trigger Starlette's listen_for_disconnect path in a unit test.
+
+        The WS send task immediately drains the outbound queue and emits the
+        CancelRequest as a websocket.send frame, so we observe it on the WS
+        outbox (not the in-memory queue).
+        """
+        from pipegate.schemas import CancelRequest as _Cancel
+
+        app = _make_app()
+        token = make_token(connection_id)
+
+        # --- WS side: accept, forward the request, deliver response frames ---
+        ws_scope: dict[str, object] = {
+            "type": "websocket",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "path": "/",
+            "query_string": f"token={token}".encode(),
+            "headers": [],
+        }
+        ws_inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        ws_outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+        await ws_inbox.put({"type": "websocket.connect"})
+        ws_task = asyncio.create_task(
+            app(ws_scope, ws_inbox.get, ws_outbox.put)  # type: ignore[arg-type]
+        )
+        await asyncio.wait_for(ws_outbox.get(), timeout=5)  # accept
+
+        # --- HTTP side: call the ASGI app directly with custom receive/send ---
+        http_scope: dict[str, object] = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": f"/{connection_id}/stream",
+            "raw_path": f"/{connection_id}/stream".encode(),
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 12345),
+            "server": ("test", 80),
+        }
+
+        request_received = asyncio.Event()
+        response_started = asyncio.Event()
+        first_chunk_sent = asyncio.Event()
+        disconnect_signalled = asyncio.Event()
+
+        async def http_receive() -> dict[str, object]:
+            if not request_received.is_set():
+                request_received.set()
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await disconnect_signalled.wait()
+            return {"type": "http.disconnect"}
+
+        async def http_send(message: dict[str, object]) -> None:
+            if message["type"] == "http.response.start":
+                response_started.set()
+            elif message["type"] == "http.response.body" and message.get("body"):
+                first_chunk_sent.set()
+
+        http_task = asyncio.create_task(
+            app(http_scope, http_receive, http_send)  # type: ignore[arg-type]
+        )
+        await asyncio.wait_for(request_received.wait(), timeout=5)
+
+        # forwarded request (BufferGateRequest) lands on the WS outbox.
+        fwd_msg = await asyncio.wait_for(ws_outbox.get(), timeout=5)
+        fwd = json.loads(cast(str, fwd_msg["text"]))
+        cid = fwd["correlation_id"]
+
+        # Send headers + one chunk, but NO ResponseEnd — body_iter stays
+        # suspended on stream_queue.get() after yielding the first chunk.
+        await ws_inbox.put(
+            {
+                "type": "websocket.receive",
+                "text": ResponseHeaders(
+                    correlation_id=cid,
+                    status_code=200,
+                    headers=orjson.dumps(
+                        [["content-type", "text/event-stream"]]
+                    ).decode(),
+                ).model_dump_json(),
+            }
+        )
+        await ws_inbox.put(
+            {
+                "type": "websocket.receive",
+                "text": ResponseChunk(
+                    correlation_id=cid,
+                    body=base64.b64encode(b"data: 1\n\n").decode(),
+                ).model_dump_json(),
+            }
+        )
+
+        # Wait for the server to start streaming (response.start + first chunk).
+        await asyncio.wait_for(response_started.wait(), timeout=5)
+        await asyncio.wait_for(first_chunk_sent.wait(), timeout=5)
+
+        # Caller disconnects — Starlette's listen_for_disconnect picks this up
+        # and cancels body_iter, whose finally must push a CancelRequest.
+        disconnect_signalled.set()
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(http_task, timeout=5)
+
+        # The WS send task drains the outbound queue and emits the
+        # CancelRequest as a websocket.send frame. Observe it here.
+        cancel_msg: dict[str, object] | None = None
+        try:
+            cancel_msg = await asyncio.wait_for(ws_outbox.get(), timeout=2)
+        except TimeoutError:
+            cancel_msg = None
+
+        await ws_inbox.put({"type": "websocket.disconnect"})
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(ws_task, timeout=2)
+
+        assert cancel_msg is not None, "no CancelRequest was emitted on the WS"
+        assert cancel_msg.get("type") == "websocket.send"
+        payload = json.loads(cast(str, cancel_msg.get("text", "")))
+        assert payload.get("type") == "cancel"
+        cancel = _Cancel.model_validate(payload)
+        assert cancel.correlation_id == uuid.UUID(cid)
+
+    async def test_tunnel_disconnect_mid_stream_terminates_response(
+        self, connection_id: str
+    ) -> None:
+        """If the WS drops while the HTTP caller is mid-stream, the server
+        pushes ResponseEnd(error=...) onto the stream queue so body_iter
+        exits promptly instead of waiting 300s for a chunk that will never
+        arrive."""
+        app = _make_app()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(outbox.get(), timeout=5)  # accept
+
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/stream"))
+            fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            fwd = json.loads(cast(str, fwd_msg["text"]))
+            cid = fwd["correlation_id"]
+
+            # Send headers + one chunk, then drop the WS without ResponseEnd.
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseHeaders(
+                        correlation_id=cid,
+                        status_code=200,
+                        headers="[]",
+                    ).model_dump_json(),
+                }
+            )
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseChunk(
+                        correlation_id=cid,
+                        body=base64.b64encode(b"partial").decode(),
+                    ).model_dump_json(),
+                }
+            )
+
+            # Wait for the first chunk to be consumed, then disconnect.
+            await asyncio.sleep(0.1)
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+            # The HTTP caller should now receive a terminated stream
+            # (body ends abruptly — no 5-minute hang).
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+        assert resp.status_code == 200
+        # The first chunk made it through; the stream just ends there.
+        assert b"partial" in resp.content
+
+    async def test_stream_idle_timeout_is_configurable(
+        self, connection_id: str
+    ) -> None:
+        """``stream_idle_timeout`` (env ``PIPEGATE_STREAM_IDLE_TIMEOUT``)
+        replaces the hardcoded 300s. With a 1s value, a stream that goes
+        idle after the first chunk must terminate within ~2s — not 300s —
+        and emit a CancelRequest so the tunnel client aborts the upstream.
+
+        This is the regression guard for the long-task streaming fix: it
+        proves the timeout is now configurable (operators of Agent/SSE
+        upstreams can raise or disable it) rather than a magic constant.
+        """
+        from pipegate.schemas import CancelRequest as _Cancel
+
+        app = create_app()
+        app.extra["settings"] = Settings(stream_idle_timeout=1)
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(outbox.get(), timeout=5)  # accept
+
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/stream"))
+            fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            fwd = json.loads(cast(str, fwd_msg["text"]))
+            cid = fwd["correlation_id"]
+
+            # Send headers + one chunk, then NO ResponseEnd. body_iter yields
+            # the chunk, loops back, and blocks on stream_queue.get() under
+            # asyncio.timeout(1). After ~1s the idle timeout fires.
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseHeaders(
+                        correlation_id=cid,
+                        status_code=200,
+                        headers="[]",
+                    ).model_dump_json(),
+                }
+            )
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseChunk(
+                        correlation_id=cid,
+                        body=base64.b64encode(b"partial").decode(),
+                    ).model_dump_json(),
+                }
+            )
+
+            # The HTTP response must resolve within 5s — proving the idle
+            # timeout fired (under the old 300s default this would hang).
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+            # The CancelRequest must be drained by the WS send task and
+            # appear on the WS outbox.
+            cancel_msg = await asyncio.wait_for(outbox.get(), timeout=2)
+
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        assert resp.status_code == 200
+        assert b"partial" in resp.content
+        assert cancel_msg.get("type") == "websocket.send"
+        payload = json.loads(cast(str, cancel_msg.get("text", "")))
+        cancel = _Cancel.model_validate(payload)
+        assert cancel.correlation_id == uuid.UUID(cid)
+
+    async def test_stream_header_timeout_is_configurable(
+        self, connection_id: str
+    ) -> None:
+        """``stream_header_timeout`` (env ``PIPEGATE_STREAM_HEADER_TIMEOUT``)
+        governs the wait for the first response frame. With a 1s value and
+        no frames sent, the caller must receive 504 within ~2s — not 300s."""
+        app = create_app()
+        app.extra["settings"] = Settings(stream_header_timeout=1)
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(outbox.get(), timeout=5)  # accept
+
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/stream"))
+            # Receive the forwarded request, but send NO response frames.
+            await asyncio.wait_for(outbox.get(), timeout=5)
+
+            # Caller must get 504 within 5s — proving the header timeout
+            # fired (under the old 300s default this would hang for minutes).
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        assert resp.status_code == 504
+
+    async def test_stream_idle_timeout_zero_disables_timeout(
+        self, connection_id: str
+    ) -> None:
+        """``stream_idle_timeout=0`` disables the idle timeout entirely —
+        body_iter must wait on stream_queue.get() without any asyncio.timeout
+        wrapper. Verified by sending no ResponseEnd and asserting the stream
+        does NOT terminate within a window well past the default 300s would
+        be impractical, so instead we assert the stream is still pending after
+        1.5s (which would have terminated at 1s under
+        ``stream_idle_timeout=1`` as proven by the test above)."""
+        app = create_app()
+        app.extra["settings"] = Settings(stream_idle_timeout=0)
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(outbox.get(), timeout=5)  # accept
+
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/stream"))
+            fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            fwd = json.loads(cast(str, fwd_msg["text"]))
+            cid = fwd["correlation_id"]
+
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseHeaders(
+                        correlation_id=cid,
+                        status_code=200,
+                        headers="[]",
+                    ).model_dump_json(),
+                }
+            )
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseChunk(
+                        correlation_id=cid,
+                        body=base64.b64encode(b"partial").decode(),
+                    ).model_dump_json(),
+                }
+            )
+
+            # After 1.5s the stream must still be pending — under
+            # stream_idle_timeout=1 it would have terminated at ~1s.
+            await asyncio.sleep(1.5)
+            assert not http_task.done(), (
+                "stream terminated despite stream_idle_timeout=0 (disabled)"
+            )
+
+            # Clean up: send ResponseEnd to let the stream complete, then
+            # tear down the WS.
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseEnd(correlation_id=cid).model_dump_json(),
+                }
+            )
+            resp = await asyncio.wait_for(http_task, timeout=5)
+
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+        assert resp.status_code == 200
+        assert b"partial" in resp.content

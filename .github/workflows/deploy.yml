@@ -49,12 +49,21 @@ jobs:
           PIPEGATE_JWT_SECRET: ${{ secrets.PIPEGATE_JWT_SECRET }}
           PIPEGATE_JWT_ALGORITHMS: ${{ vars.PIPEGATE_JWT_ALGORITHMS }}
           PIPEGATE_BASE_DOMAIN: ${{ vars.PIPEGATE_BASE_DOMAIN }}
+          PIPEGATE_STREAM_HEADER_TIMEOUT: ${{ vars.PIPEGATE_STREAM_HEADER_TIMEOUT }}
+          PIPEGATE_STREAM_IDLE_TIMEOUT: ${{ vars.PIPEGATE_STREAM_IDLE_TIMEOUT }}
         run: |
           cat > .env <<EOF
           PIPEGATE_JWT_SECRET=$PIPEGATE_JWT_SECRET
           PIPEGATE_JWT_ALGORITHMS=$PIPEGATE_JWT_ALGORITHMS
           PIPEGATE_BASE_DOMAIN=$PIPEGATE_BASE_DOMAIN
           EOF
+          # Optional streaming timeouts — only write when set, otherwise let
+          # the server fall back to its 300s default. Writing an empty value
+          # would make pydantic-settings reject the int field.
+          [ -n "$PIPEGATE_STREAM_HEADER_TIMEOUT" ] && \
+            echo "PIPEGATE_STREAM_HEADER_TIMEOUT=$PIPEGATE_STREAM_HEADER_TIMEOUT" >> .env
+          [ -n "$PIPEGATE_STREAM_IDLE_TIMEOUT" ] && \
+            echo "PIPEGATE_STREAM_IDLE_TIMEOUT=$PIPEGATE_STREAM_IDLE_TIMEOUT" >> .env
 
       - name: Base64 encode .env for transfer
         id: env_file
