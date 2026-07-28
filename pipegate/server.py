@@ -280,6 +280,22 @@ def create_app() -> FastAPI:
                     if isinstance(msg, ResponseChunk):
                         yield base64.b64decode(msg.body) if msg.body else b""
                     elif isinstance(msg, ResponseEnd):
+                        if msg.error:
+                            # Abnormal stream termination (upstream error,
+                            # WS disconnect, httpx read timeout, cancel,
+                            # etc.). Abort the HTTP response so the caller
+                            # sees a connection error rather than a silently
+                            # truncated 200 body — which would otherwise
+                            # surface as e.g. "Unterminated string in JSON
+                            # at position N" in the caller's JSON parser.
+                            logger.warning(
+                                "Stream %s aborted: %s",
+                                correlation_id,
+                                msg.error,
+                            )
+                            raise ConnectionError(
+                                f"tunnel stream terminated: {msg.error}"
+                            )
                         break
                     # A second ResponseHeaders would be a protocol bug;
                     # ignore defensively.

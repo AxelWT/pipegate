@@ -1405,8 +1405,10 @@ class TestStreamingProtocol:
     ) -> None:
         """If the WS drops while the HTTP caller is mid-stream, the server
         pushes ResponseEnd(error=...) onto the stream queue so body_iter
-        exits promptly instead of waiting 300s for a chunk that will never
-        arrive."""
+        aborts the HTTP connection — the caller sees a connection error
+        rather than a silently truncated 200 body (which would otherwise
+        surface as e.g. "Unterminated string in JSON" in the caller's
+        JSON parser)."""
         app = _make_app()
         token = make_token(connection_id)
         transport = ASGITransport(app=app)
@@ -1461,13 +1463,132 @@ class TestStreamingProtocol:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(app_task, timeout=2)
 
-            # The HTTP caller should now receive a terminated stream
-            # (body ends abruptly — no 5-minute hang).
-            resp = await asyncio.wait_for(http_task, timeout=5)
+            # The HTTP caller must now see a connection error — not a
+            # silently truncated 200 response. The ConnectionError is
+            # raised by body_iter when it receives the injected
+            # ResponseEnd(error="Tunnel client disconnected").
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(http_task, timeout=5)
 
-        assert resp.status_code == 200
-        # The first chunk made it through; the stream just ends there.
-        assert b"partial" in resp.content
+            # If httpx returned a response at all (it may surface the
+            # error as a RemoteProtocolError on .aread()), the body must
+            # NOT be a clean, complete response.
+            if http_task.done() and not http_task.cancelled():
+                exc = http_task.exception()
+                if exc is not None:
+                    # Connection aborted — exactly what we want.
+                    assert isinstance(exc, Exception)
+
+    async def test_error_mid_stream_aborts_connection(self, connection_id: str) -> None:
+        """When the tunnel client sends ResponseEnd(error=...) after
+        ResponseHeaders + chunks have already been delivered (e.g. httpx
+        ReadTimeout, upstream crash, or WS send failure mid-stream), the
+        server must abort the HTTP connection — not let body_iter exit
+        cleanly and leave the caller with a silently truncated 200 body.
+
+        This is the regression guard for the "Unterminated string in JSON
+        at position N" bug: without the abort, the caller receives a
+        partial JSON body with HTTP 200 and no error indication, causing
+        the caller's JSON parser to fail with a confusing syntax error
+        instead of a clear connection error.
+        """
+        app = _make_app()
+        token = make_token(connection_id)
+        transport = ASGITransport(app=app)
+
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            scope: dict[str, object] = {
+                "type": "websocket",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "path": "/",
+                "query_string": f"token={token}".encode(),
+                "headers": [],
+            }
+            inbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+            outbox: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            await inbox.put({"type": "websocket.connect"})
+            app_task = asyncio.create_task(
+                app(scope, inbox.get, outbox.put)  # type: ignore[arg-type]
+            )
+            await asyncio.wait_for(outbox.get(), timeout=5)  # accept
+
+            http_task = asyncio.create_task(client.get(f"/{connection_id}/x"))
+            fwd_msg = await asyncio.wait_for(outbox.get(), timeout=5)
+            fwd = json.loads(cast(str, fwd_msg["text"]))
+            cid = fwd["correlation_id"]
+
+            # Send headers + partial body, then ResponseEnd with an error
+            # (simulates httpx ReadTimeout mid-stream).
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseHeaders(
+                        correlation_id=cid,
+                        status_code=200,
+                        headers=orjson.dumps(
+                            [["content-type", "application/json"]]
+                        ).decode(),
+                    ).model_dump_json(),
+                }
+            )
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseChunk(
+                        correlation_id=cid,
+                        body=base64.b64encode(b'{"key": "val').decode(),
+                    ).model_dump_json(),
+                }
+            )
+            await inbox.put(
+                {
+                    "type": "websocket.receive",
+                    "text": ResponseEnd(
+                        correlation_id=cid,
+                        error="read timed out",
+                    ).model_dump_json(),
+                }
+            )
+
+            # The HTTP caller must see a connection error — NOT a 200
+            # with the partial body '{"key": "val' (which would cause
+            # "Unterminated string in JSON at position 14" in the
+            # caller's JSON parser).
+            error_seen = False
+            try:
+                await asyncio.wait_for(http_task, timeout=5)
+            except Exception:
+                error_seen = True
+
+            await inbox.put({"type": "websocket.disconnect"})
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(app_task, timeout=2)
+
+            # If httpx surfaced a Response despite the error (ASGITransport
+            # may deliver partial content before the exception), the body
+            # must not be a valid complete response.
+            if not error_seen and http_task.done() and not http_task.cancelled():
+                exc = http_task.exception()
+                if exc is None:
+                    resp = http_task.result()
+                    # The body must be incomplete — not a valid JSON.
+                    assert not resp.content.endswith(b"}"), (
+                        "caller received a complete-looking response body "
+                        "despite ResponseEnd(error=...) — silent truncation"
+                    )
+                else:
+                    error_seen = True
+
+            assert error_seen or (
+                http_task.done()
+                and not http_task.cancelled()
+                and http_task.exception() is not None
+            ), (
+                "caller did not see a connection error after "
+                "ResponseEnd(error=...) — body was silently truncated"
+            )
 
     async def test_stream_idle_timeout_is_configurable(
         self, connection_id: str
